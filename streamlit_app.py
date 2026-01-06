@@ -948,57 +948,56 @@ if uploaded_files:
                         
                         # Se metadados são conclusivos, usar e economizar
                         if metadata_result['is_conclusive']:
-                        metodo_deteccao = ["📋 Metadados"]
-                        score_final = 100 - metadata_result['confidence'] if metadata_result['verdict'] == 'MANIPULADA' else metadata_result['confidence']
-                        
-                        col1, col2 = st.columns(2)
-                        
-                        with col1:
-                            st.image(img, use_column_width=True)
+                            metodo_deteccao = ["📋 Metadados"]
+                            score_final = 100 - metadata_result['confidence'] if metadata_result['verdict'] == 'MANIPULADA' else metadata_result['confidence']
                             
-                            # VEREDITO
+                            col1, col2 = st.columns(2)
+                            
+                            with col1:
+                                st.image(img, use_column_width=True)
+                                
+                                # VEREDITO
+                                if metadata_result['verdict'] == 'MANIPULADA':
+                                    st.error(f"🔴 MANIPULADA ({metadata_result['confidence']}%)")
+                                elif metadata_result['verdict'] == 'SUSPEITA':
+                                    st.warning(f"🟡 SUSPEITA ({metadata_result['confidence']}%)")
+                                else:
+                                    st.success(f"🟢 NATURAL ({metadata_result['confidence']}%)")
+                                
+                                # BADGES
+                                badges_html = '<span style="background-color: #28a745; color: white; padding: 4px 8px; border-radius: 4px; margin: 2px; display: inline-block;">📋 Metadados</span>'
+                                st.markdown(f"**Detectado por:**<br>{badges_html}", unsafe_allow_html=True)
+                                
+                                # Economia
+                                st.success("💰 **Análise Econômica:**\n- ✅ Metadados conclusivos\n- ❌ Análise técnica não necessária\n- ❌ Análise IA não necessária\n- 💵 Economia: $0.02")
+                                
+                                with st.expander("📊 Detalhes"):
+                                    st.write(f"**Veredito:** {metadata_result['verdict']}")
+                                    st.write(f"**Confiança:** {metadata_result['confidence']}%")
+                                    st.write(f"**Detalhes:** {metadata_result['details']}")
+                                    if metadata_result['metadata']:
+                                        st.write("**Metadados Encontrados:**")
+                                        for key, value in metadata_result['metadata'].items():
+                                            st.write(f"- {key}: {value}")
+                            
+                            with col2:
+                                st.info("### 🎯 Análise Rápida\n\nMetadados EXIF conclusivos detectados!\n\nNão foi necessário processar a imagem com algoritmos pesados ou IA, economizando tempo e custo.")
+                            
+                            # Estatísticas
+                            for metodo in metodo_deteccao:
+                                if metodo in stats_metodo:
+                                    stats_metodo[metodo] += 1
+                                else:
+                                    stats_metodo["🔬 Híbrido"] += 1
+                            
                             if metadata_result['verdict'] == 'MANIPULADA':
-                                st.error(f"🔴 MANIPULADA ({metadata_result['confidence']}%)")
+                                stats_veredito["MANIPULADA"] += 1
                             elif metadata_result['verdict'] == 'SUSPEITA':
-                                st.warning(f"🟡 SUSPEITA ({metadata_result['confidence']}%)")
+                                stats_veredito["SUSPEITA"] += 1
                             else:
-                                st.success(f"🟢 NATURAL ({metadata_result['confidence']}%)")
+                                stats_veredito["NATURAL"] += 1
                             
-                            # BADGES
-                            badges_html = '<span style="background-color: #28a745; color: white; padding: 4px 8px; border-radius: 4px; margin: 2px; display: inline-block;">📋 Metadados</span>'
-                            st.markdown(f"**Detectado por:**<br>{badges_html}", unsafe_allow_html=True)
-                            
-                            # Economia
-                            st.success("💰 **Análise Econômica:**\n- ✅ Metadados conclusivos\n- ❌ Análise técnica não necessária\n- ❌ Análise IA não necessária\n- 💵 Economia: $0.02")
-                            
-                            with st.expander("📊 Detalhes"):
-                                st.write(f"**Veredito:** {metadata_result['verdict']}")
-                                st.write(f"**Confiança:** {metadata_result['confidence']}%")
-                                st.write(f"**Detalhes:** {metadata_result['details']}")
-                                if metadata_result['metadata']:
-                                    st.write("**Metadados Encontrados:**")
-                                    for key, value in metadata_result['metadata'].items():
-                                        st.write(f"- {key}: {value}")
-                        
-                        with col2:
-                            st.info("### 🎯 Análise Rápida\n\nMetadados EXIF conclusivos detectados!\n\nNão foi necessário processar a imagem com algoritmos pesados ou IA, economizando tempo e custo.")
-                        
-                        # Estatísticas
-                        metodo_deteccao.append("📋 Metadados")
-                        for metodo in metodo_deteccao:
-                            if metodo in stats_metodo:
-                                stats_metodo[metodo] += 1
-                            else:
-                                stats_metodo["🔬 Híbrido"] += 1
-                        
-                        if metadata_result['verdict'] == 'MANIPULADA':
-                            stats_veredito["MANIPULADA"] += 1
-                        elif metadata_result['verdict'] == 'SUSPEITA':
-                            stats_veredito["SUSPEITA"] += 1
-                        else:
-                            stats_veredito["NATURAL"] += 1
-                        
-                        continue  # Pula para próxima imagem
+                            continue  # Pula para próxima imagem
                     
                     # ===== CAMADA 2: ANÁLISE TÉCNICA =====
                     report = analyzer.analyze_image(img)
