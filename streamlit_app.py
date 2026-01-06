@@ -5,29 +5,138 @@ import pandas as pd
 import cv2
 from skimage.feature import local_binary_pattern
 from skimage.restoration import estimate_sigma
-from scipy.stats import entropy, kurtosis
+from scipy.stats import entropy
 from typing import Dict, List, Tuple, Any, Union
 from enum import Enum
+import base64
+import io
+import os
 
 # ============================================================================
-# TEXTURE ANALYZER - Integrado
+# OPENAI INTEGRATION
 # ============================================================================
 
-CLAHE_CONFIG = {
-    "texture_clahe": False,
-    "edge_clahe": True,
-    "noise_clahe": True,
-    "lighting_clahe": True,
-    "clip_limit": 2.0
-}
+try:
+    import openai
+    OPENAI_AVAILABLE = True
+except ImportError:
+    OPENAI_AVAILABLE = False
 
+class AIAnalyzer:
+    """Integração com OpenAI Vision API para análise de manipulação"""
+    
+    def __init__(self, api_key: str = None):
+        self.api_key = api_key or os.getenv("OPENAI_API_KEY")
+        self.enabled = bool(self.api_key and OPENAI_AVAILABLE)
+        
+        if self.enabled:
+            openai.api_key = self.api_key
+    
+    def encode_image(self, image: Union[Image.Image, np.ndarray]) -> str:
+        """Converte imagem para base64"""
+        if isinstance(image, np.ndarray):
+            image = Image.fromarray(image)
+        
+        buffered = io.BytesIO()
+        image.save(buffered, format="JPEG", quality=95)
+        return base64.b64encode(buffered.getvalue()).decode('utf-8')
+    
+    def analyze_with_gpt4(self, image: Union[Image.Image, np.ndarray]) -> Dict[str, Any]:
+        """Analisa imagem com GPT-4 Vision"""
+        if not self.enabled:
+            return {
+                'enabled': False,
+                'verdict': 'DESCONHECIDO',
+                'confidence': 0,
+                'explanation': 'API OpenAI não configurada',
+                'indicators': []
+            }
+        
+        try:
+            base64_image = self.encode_image(image)
+            
+            response = openai.ChatCompletion.create(
+                model="gpt-4-vision-preview",
+                messages=[
+                    {
+                        "role": "system",
+                        "content": """Você é um especialista forense em detecção de imagens manipuladas, 
+                        geradas por IA ou editadas digitalmente. Analise cuidadosamente a imagem fornecida."""
+                    },
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": """Analise esta imagem e determine se é:
+                                1. NATURAL: Foto real, não editada
+                                2. MANIPULADA: Editada, gerada por IA ou com manipulações digitais
+                                
+                                Procure por:
+                                - Artefatos de IA (padrões irreais, texturas artificiais)
+                                - Inconsistências de iluminação
+                                - Reflexos impossíveis ou incorretos
+                                - Distorções em objetos ou pessoas
+                                - Bordas artificiais ou desfocagem seletiva anormal
+                                - Texturas repetitivas ou não naturais
+                                - Detalhes anatômicos incorretos (em pessoas)
+                                - Perspectiva inconsistente
+                                - Compressão ou artefatos de processamento
+                                
+                                Responda em formato JSON:
+                                {
+                                  "verdict": "NATURAL" ou "MANIPULADA",
+                                  "confidence": 0-100,
+                                  "explanation": "explicação detalhada em português",
+                                  "indicators": ["lista", "de", "indicadores", "encontrados"]
+                                }"""
+                            },
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:image/jpeg;base64,{base64_image}"
+                                }
+                            }
+                        ]
+                    }
+                ],
+                max_tokens=1000,
+                temperature=0.3
+            )
+            
+            result_text = response.choices[0].message.content
+            
+            # Parse JSON response
+            import json
+            # Extrai JSON da resposta (pode vir com texto extra)
+            json_start = result_text.find('{')
+            json_end = result_text.rfind('}') + 1
+            if json_start != -1 and json_end > json_start:
+                result_json = json.loads(result_text[json_start:json_end])
+            else:
+                # Fallback se não encontrar JSON
+                result_json = {
+                    'verdict': 'DESCONHECIDO',
+                    'confidence': 50,
+                    'explanation': result_text,
+                    'indicators': []
+                }
+            
+            result_json['enabled'] = True
+            return result_json
+            
+        except Exception as e:
+            return {
+                'enabled': True,
+                'verdict': 'ERRO',
+                'confidence': 0,
+                'explanation': f'Erro ao analisar com IA: {str(e)}',
+                'indicators': []
+            }
 
-def apply_clahe(img_gray: np.ndarray, clip_limit: float = 2.0) -> np.ndarray:
-    if img_gray.dtype != np.uint8:
-        img_gray = np.clip(img_gray, 0, 255).astype(np.uint8)
-    clahe = cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=(8, 8))
-    return clahe.apply(img_gray)
-
+# ============================================================================
+# SCENE DETECTOR (mantido do V2)
+# ============================================================================
 
 class SceneType(Enum):
     CAR = "CAR"
@@ -45,8 +154,9 @@ class SceneType(Enum):
     DOCUMENT = "DOCUMENT"
     UNKNOWN = "UNKNOWN"
 
-
 class SceneDetector:
+    """Detecta tipo de cena na imagem"""
+    
     def __init__(self):
         pass
     
@@ -80,11 +190,6 @@ class SceneDetector:
             if 1.5 < aspect < 4.0:
                 indicators += 1
                 break
-        lower_third = gray[int(h*0.6):, :]
-        if lower_third.size > 0:
-            circles = cv2.HoughCircles(lower_third, cv2.HOUGH_GRADIENT, 1, 50, param1=50, param2=30, minRadius=10, maxRadius=100)
-            if circles is not None and len(circles[0]) >= 2:
-                indicators += 1
         confidence = indicators / total_checks
         return confidence >= 0.5, confidence, []
     
@@ -93,10 +198,8 @@ class SceneDetector:
             image = np.array(image.convert('RGB'))
         if len(image.shape) == 3:
             gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
-            hsv = cv2.cvtColor(image, cv2.COLOR_RGB2HSV)
         else:
             gray = image.copy()
-            hsv = None
         indicators = 0
         total_checks = 4
         h, w = gray.shape
@@ -105,154 +208,40 @@ class SceneDetector:
         total_blocks = max(1, ((h - block_size) // block_size) * ((w - block_size) // block_size))
         if low_texture_blocks / total_blocks > 0.3:
             indicators += 1
-        if hsv is not None:
-            low_sat_ratio = np.mean(hsv[:, :, 1] < 40)
-            if low_sat_ratio > 0.4:
-                indicators += 1
-        _, bright = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY)
-        bright_ratio = np.mean(bright > 0)
-        if 0.05 < bright_ratio < 0.4:
-            indicators += 1
-        blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-        grad_x = cv2.Sobel(blurred, cv2.CV_64F, 1, 0, ksize=3)
-        grad_y = cv2.Sobel(blurred, cv2.CV_64F, 0, 1, ksize=3)
-        magnitude = np.sqrt(grad_x**2 + grad_y**2)
-        if np.mean(magnitude < 10) > 0.5:
-            indicators += 1
         confidence = indicators / total_checks
         is_glass = confidence >= 0.5
-        glass_type = "window" if bright_ratio > 0.15 else "dark_glass" if is_glass else "unknown"
+        glass_type = "window" if confidence > 0.6 else "dark_glass" if is_glass else "unknown"
         return is_glass, confidence, glass_type
-    
-    def detect_reflection(self, image: np.ndarray) -> Tuple[float, bool, Dict]:
-        if isinstance(image, Image.Image):
-            image = np.array(image.convert('RGB'))
-        if len(image.shape) == 3:
-            gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
-            hsv = cv2.cvtColor(image, cv2.COLOR_RGB2HSV)
-            saturation = hsv[:, :, 1]
-        else:
-            gray = image
-            saturation = np.zeros_like(gray)
-        _, bright = cv2.threshold(gray, 170, 255, cv2.THRESH_BINARY)
-        _, low_sat = cv2.threshold(saturation, 50, 255, cv2.THRESH_BINARY_INV)
-        reflection_mask = cv2.bitwise_and(bright, low_sat)
-        percent = np.mean(reflection_mask > 0)
-        contours, _ = cv2.findContours(reflection_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        reflection_info = {"percent": percent, "num_regions": len(contours), "is_specular": False, "is_diffuse": False}
-        if len(contours) > 0:
-            areas = [cv2.contourArea(c) for c in contours]
-            max_area = max(areas)
-            total_area = sum(areas)
-            if max_area > total_area * 0.5:
-                reflection_info["is_specular"] = True
-            else:
-                reflection_info["is_diffuse"] = True
-        is_significant = percent > 0.10
-        return percent, is_significant, reflection_info
-    
-    def detect_smooth_surface(self, image: np.ndarray) -> Tuple[float, bool, str]:
-        if isinstance(image, Image.Image):
-            image = np.array(image.convert('RGB'))
-        if len(image.shape) == 3:
-            gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
-        else:
-            gray = image
-        block_size = 32
-        h, w = gray.shape
-        block_stds = []
-        for i in range(0, h - block_size, block_size):
-            for j in range(0, w - block_size, block_size):
-                block = gray[i:i+block_size, j:j+block_size]
-                block_stds.append(np.std(block))
-        mean_std = np.mean(block_stds) if block_stds else 50
-        std_of_stds = np.std(block_stds) if block_stds else 50
-        if mean_std < 15 and std_of_stds < 10:
-            is_smooth, smooth_percent, surface_type = True, 0.9, "glass"
-        elif mean_std < 25 and std_of_stds < 15:
-            is_smooth, smooth_percent, surface_type = True, 0.7, "painted_wall"
-        elif mean_std < 35:
-            is_smooth, smooth_percent, surface_type = True, 0.5, "semi_smooth"
-        else:
-            is_smooth, smooth_percent, surface_type = False, 0.0, "textured"
-        return smooth_percent, is_smooth, surface_type
-    
-    def detect_document(self, image: np.ndarray) -> Tuple[bool, float, List[Dict]]:
-        if isinstance(image, Image.Image):
-            image = np.array(image.convert('RGB'))
-        h, w = image.shape[:2]
-        total_area = h * w
-        hsv = cv2.cvtColor(image, cv2.COLOR_RGB2HSV)
-        lower_white = np.array([0, 0, 195])
-        upper_white = np.array([180, 50, 255])
-        white_mask = cv2.inRange(hsv, lower_white, upper_white)
-        kernel = np.ones((9, 9), np.uint8)
-        white_mask = cv2.morphologyEx(white_mask, cv2.MORPH_CLOSE, kernel)
-        contours, _ = cv2.findContours(white_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        documents = []
-        for contour in contours:
-            area = cv2.contourArea(contour)
-            area_ratio = area / total_area
-            if area_ratio < 0.005 or area_ratio > 0.6:
-                continue
-            x, y, cw, ch = cv2.boundingRect(contour)
-            aspect_ratio = max(cw, ch) / min(cw, ch) if min(cw, ch) > 0 else 0
-            if 1.0 <= aspect_ratio <= 4.0:
-                documents.append({"bbox": (x, y, cw, ch), "area_percent": area_ratio * 100})
-        has_document = len(documents) > 0
-        confidence = min(1.0, len(documents) * 0.3 + (0.5 if has_document else 0))
-        return has_document, confidence, documents
     
     def classify(self, image: np.ndarray) -> Tuple[Any, Dict[str, Any]]:
         if isinstance(image, Image.Image):
             image = np.array(image.convert('RGB'))
         has_car, car_conf, _ = self.detect_car(image)
         has_glass, glass_conf, glass_type = self.detect_glass(image)
-        reflection_pct, has_reflection, reflection_info = self.detect_reflection(image)
-        smooth_pct, is_smooth, surface_type = self.detect_smooth_surface(image)
-        has_document, doc_conf, documents = self.detect_document(image)
+        
         detection_info = {
             "car": {"detected": has_car, "confidence": car_conf},
-            "glass": {"detected": has_glass, "confidence": glass_conf, "type": glass_type},
-            "reflection": {"detected": has_reflection, "percent": reflection_pct, "info": reflection_info},
-            "smooth": {"detected": is_smooth, "percent": smooth_pct, "type": surface_type},
-            "document": {"detected": has_document, "confidence": doc_conf, "count": len(documents)}
+            "glass": {"detected": has_glass, "confidence": glass_conf, "type": glass_type}
         }
-        scene_type = self._determine_scene_type(has_car, has_glass, has_reflection, is_smooth, has_document, surface_type)
-        return scene_type, detection_info
-    
-    def _determine_scene_type(self, has_car: bool, has_glass: bool, has_reflection: bool, is_smooth: bool, has_document: bool, surface_type: str) -> Any:
-        is_wall = surface_type in ["painted_wall", "semi_smooth"]
-        if has_car and has_glass and has_reflection:
-            return SceneType.CAR_GLASS_REFLECTION
+        
         if has_car and has_glass:
-            return SceneType.CAR_GLASS
-        if has_car and has_reflection:
-            return SceneType.CAR_REFLECTION
-        if has_car and is_wall:
-            return SceneType.CAR_SMOOTH_WALL
-        if has_car and has_document:
-            return SceneType.CAR_DOCUMENT
-        if has_glass and has_reflection:
-            return SceneType.GLASS_REFLECTION
-        if has_glass and is_wall:
-            return SceneType.GLASS_WALL
-        if has_glass and has_document:
-            return SceneType.GLASS_DOCUMENT
-        if has_car:
-            return SceneType.CAR
-        if has_glass:
-            return SceneType.GLASS
-        if has_reflection:
-            return SceneType.REFLECTION
-        if is_smooth:
-            return SceneType.SMOOTH_WALL
-        if has_document:
-            return SceneType.DOCUMENT
-        return SceneType.UNKNOWN
+            scene_type = SceneType.CAR_GLASS
+        elif has_car:
+            scene_type = SceneType.CAR
+        elif has_glass:
+            scene_type = SceneType.GLASS
+        else:
+            scene_type = SceneType.UNKNOWN
+            
+        return scene_type, detection_info
 
+# ============================================================================
+# TEXTURE ANALYZER (mantido e melhorado)
+# ============================================================================
 
 class TextureAnalyzer:
+    """Análise técnica de textura, bordas, ruído, etc."""
+    
     def __init__(self):
         self.scene_detector = SceneDetector()
     
@@ -292,23 +281,8 @@ class TextureAnalyzer:
         lighting_score = (brightness_score * 0.5) + (contrast_score * 0.5)
         return float(np.clip(lighting_score, 0, 1))
     
-    def analyze_reflection(self, image: np.ndarray) -> float:
-        if isinstance(image, Image.Image):
-            image = np.array(image.convert('RGB'))
-        if len(image.shape) == 3:
-            gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
-            hsv = cv2.cvtColor(image, cv2.COLOR_RGB2HSV)
-            saturation = hsv[:, :, 1]
-        else:
-            gray = image
-            saturation = np.zeros_like(gray)
-        _, bright = cv2.threshold(gray, 170, 255, cv2.THRESH_BINARY)
-        _, low_sat = cv2.threshold(saturation, 50, 255, cv2.THRESH_BINARY_INV)
-        reflection_mask = cv2.bitwise_and(bright, low_sat)
-        reflection_percent = np.mean(reflection_mask > 0)
-        return float(np.clip(reflection_percent, 0, 1))
-    
-    def analyze(self, image: Union[Image.Image, np.ndarray], detection_mode: str = "Balanceado") -> Dict[str, Any]:
+    def analyze(self, image: Union[Image.Image, np.ndarray]) -> Dict[str, Any]:
+        """Análise técnica tradicional"""
         if isinstance(image, Image.Image):
             image_np = np.array(image.convert('RGB'))
         else:
@@ -322,102 +296,188 @@ class TextureAnalyzer:
         edge_score = self.analyze_edges(gray)
         noise_score = self.analyze_noise(gray)
         lighting_score = self.analyze_lighting(gray)
-        reflection_score = self.analyze_reflection(image_np)
         
-        weights = self._get_weights(detection_mode, detection_info)
+        weights = {'texture': 0.30, 'edge': 0.30, 'noise': 0.20, 'lighting': 0.20}
         
         all_scores = {
             'texture': round(texture_score * 100, 2),
             'edge': round(edge_score * 100, 2),
             'noise': round(noise_score * 100, 2),
-            'lighting': round(lighting_score * 100, 2),
-            'reflection': round(reflection_score * 100, 2)
+            'lighting': round(lighting_score * 100, 2)
         }
         
         weighted_score = (
             texture_score * weights['texture'] +
             edge_score * weights['edge'] +
             noise_score * weights['noise'] +
-            lighting_score * weights['lighting'] +
-            reflection_score * weights['reflection']
+            lighting_score * weights['lighting']
         )
         
         confidence = int(weighted_score * 100)
         verdict = "MANIPULADA" if weighted_score > 0.5 else "NATURAL"
-        reason = self._get_reason(weighted_score, all_scores, detection_info)
         
         return {
             'verdict': verdict,
             'confidence': confidence,
-            'reason': reason,
             'scene_type': scene_type.value,
             'all_scores': all_scores,
             'detection_info': detection_info,
-            'phases_executed': 'Análise Completa'
+            'technical_score': weighted_score
         }
-    
-    def _get_weights(self, detection_mode: str, detection_info: Dict) -> Dict[str, float]:
-        base_weights = {
-            'texture': 0.25,
-            'edge': 0.25,
-            'noise': 0.20,
-            'lighting': 0.20,
-            'reflection': 0.10
-        }
-        
-        if detection_mode == "Conservador":
-            base_weights['texture'] = 0.30
-            base_weights['edge'] = 0.30
-        elif detection_mode == "Agressivo":
-            base_weights['noise'] = 0.25
-            base_weights['reflection'] = 0.15
-        
-        return base_weights
-    
-    def _get_reason(self, score: float, all_scores: Dict, detection_info: Dict) -> str:
-        if score > 0.7:
-            return "Múltiplos indicadores de manipulação detectados"
-        elif score > 0.5:
-            return "Alguns indicadores de manipulação encontrados"
-        else:
-            return "Imagem parece ser natural"
 
+# ============================================================================
+# HYBRID ANALYZER - Combina análise técnica + IA
+# ============================================================================
+
+class MirrorGlassV3:
+    """Sistema híbrido: Análise Técnica + OpenAI Vision"""
+    
+    def __init__(self, api_key: str = None, use_ai: bool = True):
+        self.texture_analyzer = TextureAnalyzer()
+        self.ai_analyzer = AIAnalyzer(api_key) if use_ai else None
+        self.use_ai = use_ai and (self.ai_analyzer is not None) and self.ai_analyzer.enabled
+    
+    def combine_verdicts(self, technical: Dict, ai: Dict) -> Dict[str, Any]:
+        """Combina vereditos técnico e de IA"""
+        
+        # Se IA não está ativa, retorna apenas técnico
+        if not ai.get('enabled', False):
+            return {
+                **technical,
+                'analysis_mode': 'Técnica apenas',
+                'reason': 'Análise baseada em características técnicas da imagem'
+            }
+        
+        # Normaliza vereditos
+        tech_is_manipulated = technical['verdict'] == 'MANIPULADA'
+        ai_is_manipulated = ai['verdict'] == 'MANIPULADA'
+        
+        # Confiança combinada (média ponderada: 40% técnica, 60% IA)
+        tech_conf = technical['confidence'] / 100.0
+        ai_conf = ai['confidence'] / 100.0
+        
+        combined_conf = (tech_conf * 0.4 + ai_conf * 0.6)
+        
+        # Veredito final
+        if tech_is_manipulated and ai_is_manipulated:
+            final_verdict = "MANIPULADA"
+            reason = f"🔴 Ambas análises concordam: {ai.get('explanation', '')}"
+        elif not tech_is_manipulated and not ai_is_manipulated:
+            final_verdict = "NATURAL"
+            reason = f"🟢 Ambas análises concordam: {ai.get('explanation', '')}"
+        elif ai_is_manipulated and ai_conf > 0.7:
+            # IA tem alta confiança em manipulação
+            final_verdict = "MANIPULADA"
+            combined_conf = ai_conf * 0.9  # Prioriza IA
+            reason = f"⚠️ IA detectou manipulação com alta confiança: {ai.get('explanation', '')}"
+        elif tech_is_manipulated and tech_conf > 0.7:
+            # Técnica tem alta confiança
+            final_verdict = "MANIPULADA"
+            combined_conf = tech_conf * 0.85
+            reason = f"⚠️ Análise técnica detectou anomalias. IA sugere: {ai.get('explanation', '')}"
+        else:
+            # Conflito com baixa confiança - usa média
+            final_verdict = "MANIPULADA" if combined_conf > 0.5 else "NATURAL"
+            reason = f"⚠️ Análises divergentes. IA: {ai.get('explanation', '')}"
+        
+        return {
+            **technical,
+            'verdict': final_verdict,
+            'confidence': int(combined_conf * 100),
+            'reason': reason,
+            'ai_analysis': ai,
+            'technical_confidence': technical['confidence'],
+            'ai_confidence': ai['confidence'],
+            'analysis_mode': 'Híbrida (Técnica + IA)',
+            'ai_indicators': ai.get('indicators', [])
+        }
+    
+    def analyze(self, image: Union[Image.Image, np.ndarray]) -> Dict[str, Any]:
+        """Análise completa: técnica + IA"""
+        
+        # 1. Análise técnica (sempre executa)
+        technical_result = self.texture_analyzer.analyze(image)
+        
+        # 2. Análise com IA (se habilitada)
+        if self.use_ai:
+            ai_result = self.ai_analyzer.analyze_with_gpt4(image)
+        else:
+            ai_result = {'enabled': False}
+        
+        # 3. Combina resultados
+        final_result = self.combine_verdicts(technical_result, ai_result)
+        
+        return final_result
 
 # ============================================================================
 # STREAMLIT APP
 # ============================================================================
 
 st.set_page_config(
-    page_title="MirrorGlass V2 - Análise em Lote",
+    page_title="MirrorGlass V3 - AI Enhanced",
     page_icon="🔍",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
+# Configuração da API na sidebar
 with st.sidebar:
-    st.title("⚙️ Configurações")
-
+    st.title("⚙️ MirrorGlass V3")
+    st.markdown("### 🤖 AI Enhanced Detection")
+    
     st.markdown("---")
-
-    st.success("✅ Modo Automático Ativo")
-    st.info("O sistema detecta automaticamente carros, vidros, reflexos e ajusta os pesos de análise.")
-
-    detection_mode = st.selectbox(
-        "Sensibilidade",
-        ["Balanceado", "Conservador", "Agressivo"],
-        index=0,
-        help="Conservador = menos falsos positivos | Agressivo = detecta mais manipulações"
+    
+    # Configuração OpenAI
+    st.subheader("🔑 OpenAI API")
+    
+    api_key_input = st.text_input(
+        "API Key",
+        type="password",
+        help="Cole sua chave da API OpenAI aqui. Deixe vazio para usar apenas análise técnica."
     )
     
-    st.markdown("---")
-    st.subheader("📊 Exibição")
+    use_ai = st.checkbox(
+        "Ativar Análise com IA",
+        value=bool(api_key_input or os.getenv("OPENAI_API_KEY")),
+        help="Usa GPT-4 Vision para análise complementar"
+    )
     
-    show_heatmaps = st.checkbox("Mostrar Detalhes", value=True)
+    if use_ai and not api_key_input and not os.getenv("OPENAI_API_KEY"):
+        st.warning("⚠️ Configure a API Key para usar IA")
+    elif use_ai:
+        st.success("✅ IA Ativada")
+    else:
+        st.info("ℹ️ Modo técnico apenas")
+    
+    st.markdown("---")
+    
+    # Configurações de exibição
+    st.subheader("📊 Exibição")
+    show_details = st.checkbox("Mostrar Detalhes Técnicos", value=True)
     cols_per_row = st.slider("Imagens por linha", 1, 4, 2)
+    
+    st.markdown("---")
+    
+    # Informações
+    with st.expander("ℹ️ Sobre"):
+        st.markdown("""
+        **MirrorGlass V3** combina:
+        
+        - 🔧 Análise técnica tradicional
+        - 🤖 GPT-4 Vision (OpenAI)
+        
+        **Vantagens:**
+        - Detecta manipulações sutis
+        - Identifica IA generativa
+        - Explica os achados
+        - Maior precisão
+        """)
 
-st.title("🔍 MirrorGlass V2")
-st.markdown("### Detector de Manipulação em Lote")
+# Interface principal
+st.title("🔍 MirrorGlass V3")
+st.markdown("### Detector de Manipulação com IA")
 
+# Upload de arquivos
 uploaded_files = st.file_uploader(
     "📤 Arraste suas imagens aqui",
     type=['jpg', 'jpeg', 'png'],
@@ -431,10 +491,13 @@ if uploaded_files:
     
     if st.button("🚀 Analisar Todas", type="primary", use_container_width=True):
         
-        analyzer = TextureAnalyzer()
+        # Inicializa o analisador
+        analyzer = MirrorGlassV3(
+            api_key=api_key_input,
+            use_ai=use_ai
+        )
         
         results = []
-        
         progress_bar = st.progress(0)
         status_text = st.empty()
         
@@ -444,7 +507,8 @@ if uploaded_files:
             image = Image.open(uploaded_file).convert('RGB')
             image_np = np.array(image)
             
-            result = analyzer.analyze(image, detection_mode)
+            # Análise
+            result = analyzer.analyze(image)
             
             result['image'] = image
             result['image_np'] = image_np
@@ -459,14 +523,16 @@ if uploaded_files:
         st.session_state.results = results
         st.success(f"✅ Análise concluída! {len(results)} imagens processadas.")
 
+# Exibição dos resultados
 if 'results' in st.session_state and st.session_state.results:
     results = st.session_state.results
     
     st.markdown("---")
-    st.markdown("## 📊 Resumo")
+    st.markdown("## 📊 Resumo Geral")
     
     manipuladas = sum(1 for r in results if r['verdict'] == 'MANIPULADA')
     naturais = sum(1 for r in results if r['verdict'] == 'NATURAL')
+    avg_confidence = int(np.mean([r['confidence'] for r in results]))
     
     col1, col2, col3, col4 = st.columns(4)
     
@@ -477,10 +543,10 @@ if 'results' in st.session_state and st.session_state.results:
     with col3:
         st.metric("🟢 Naturais", naturais)
     with col4:
-        st.metric("Confiança Média", f"{int(np.mean([r['confidence'] for r in results]))}%")
+        st.metric("Confiança Média", f"{avg_confidence}%")
     
+    # Filtros
     st.markdown("---")
-    
     filter_option = st.radio(
         "Filtrar por:",
         ["Todas", "🔴 Manipuladas", "🟢 Naturais"],
@@ -496,6 +562,7 @@ if 'results' in st.session_state and st.session_state.results:
     
     st.markdown(f"### Exibindo {len(filtered_results)} imagem(ns)")
     
+    # Exibir resultados
     for i in range(0, len(filtered_results), cols_per_row):
         cols = st.columns(cols_per_row)
         
@@ -504,8 +571,10 @@ if 'results' in st.session_state and st.session_state.results:
                 result = filtered_results[i + j]
                 
                 with col:
+                    # Imagem
                     st.image(result['image'], caption=result['filename'], use_column_width=True)
                     
+                    # Veredito
                     verdict = result['verdict']
                     confidence = result['confidence']
                     
@@ -514,20 +583,37 @@ if 'results' in st.session_state and st.session_state.results:
                     else:
                         st.success(f"🟢 **{verdict}** ({confidence}%)")
                     
-                    st.caption(f"📍 Cena: {result.get('scene_type', 'N/A')}")
-                    st.caption(f"💡 {result['reason']}")
+                    # Modo de análise
+                    st.caption(f"🔬 {result.get('analysis_mode', 'N/A')}")
                     
-                    if show_heatmaps:
-                        with st.expander("📊 Detalhes"):
+                    # Razão
+                    with st.expander("💡 Explicação"):
+                        st.write(result.get('reason', 'N/A'))
+                    
+                    # Detalhes técnicos
+                    if show_details:
+                        with st.expander("📊 Detalhes Técnicos"):
+                            st.write(f"**Cena:** {result.get('scene_type', 'N/A')}")
+                            
                             scores = result.get('all_scores', {})
-                            st.write(f"**Textura**: {scores.get('texture', 'N/A')}%")
-                            st.write(f"**Bordas**: {scores.get('edge', 'N/A')}%")
-                            st.write(f"**Ruído**: {scores.get('noise', 'N/A')}%")
-                            st.write(f"**Iluminação**: {scores.get('lighting', 'N/A')}%")
-                            st.write(f"**Reflexo**: {scores.get('reflection', 'N/A')}%")
+                            st.write(f"**Textura:** {scores.get('texture', 'N/A')}%")
+                            st.write(f"**Bordas:** {scores.get('edge', 'N/A')}%")
+                            st.write(f"**Ruído:** {scores.get('noise', 'N/A')}%")
+                            st.write(f"**Iluminação:** {scores.get('lighting', 'N/A')}%")
+                            
+                            if 'ai_analysis' in result and result['ai_analysis'].get('enabled'):
+                                st.markdown("---")
+                                st.write("**Análise IA:**")
+                                st.write(f"Confiança: {result.get('ai_confidence', 'N/A')}%")
+                                
+                                indicators = result.get('ai_indicators', [])
+                                if indicators:
+                                    st.write("**Indicadores:**")
+                                    for ind in indicators:
+                                        st.write(f"- {ind}")
     
+    # Exportação
     st.markdown("---")
-    
     with st.expander("📥 Exportar Resultados"):
         export_data = []
         for r in results:
@@ -536,13 +622,15 @@ if 'results' in st.session_state and st.session_state.results:
                 'Arquivo': r['filename'],
                 'Veredito': r['verdict'],
                 'Confiança': r['confidence'],
-                'Razão': r['reason'],
+                'Modo Análise': r.get('analysis_mode', 'N/A'),
+                'Razão': r.get('reason', 'N/A'),
                 'Cena': r.get('scene_type', 'N/A'),
                 'Score Textura': scores.get('texture', 'N/A'),
                 'Score Bordas': scores.get('edge', 'N/A'),
                 'Score Ruído': scores.get('noise', 'N/A'),
                 'Score Iluminação': scores.get('lighting', 'N/A'),
-                'Reflexo %': scores.get('reflection', 'N/A')
+                'Confiança Técnica': r.get('technical_confidence', 'N/A'),
+                'Confiança IA': r.get('ai_confidence', 'N/A')
             })
         
         df = pd.DataFrame(export_data)
@@ -552,7 +640,7 @@ if 'results' in st.session_state and st.session_state.results:
         st.download_button(
             "📥 Baixar CSV",
             csv,
-            "mirrorglass_resultados.csv",
+            "mirrorglass_v3_resultados.csv",
             "text/csv",
             use_container_width=True
         )
@@ -561,33 +649,38 @@ else:
     st.markdown("---")
     st.info("👆 Faça upload de imagens e clique em **Analisar Todas** para começar")
     
-    with st.expander("📖 Como usar"):
+    with st.expander("📖 Guia Rápido"):
         st.markdown("""
-        ### Passo a passo:
-
-        1. **Configure** a sensibilidade na sidebar esquerda:
-           - **Conservador**: Menos falsos positivos
-           - **Balanceado**: Equilíbrio entre precisão e recall
-           - **Agressivo**: Detecta mais manipulações
-
-        2. **Arraste** suas imagens para a área de upload
-
-        3. **Clique** em "Analisar Todas"
-
-        4. **Filtre** os resultados por veredito
-
-        5. **Exporte** para CSV se necessário
-
-        ### Sobre os vereditos:
-
-        - 🔴 **MANIPULADA**: Alta probabilidade de ser IA ou editada
+        ### Como usar o MirrorGlass V3:
+        
+        **1. Configure a API OpenAI** (opcional mas recomendado):
+        - Obtenha uma chave em [platform.openai.com](https://platform.openai.com/api-keys)
+        - Cole na sidebar
+        - Ative "Análise com IA"
+        
+        **2. Faça upload das imagens**
+        
+        **3. Clique em "Analisar Todas"**
+        
+        **4. Veja os resultados:**
+        - 🔴 **MANIPULADA**: Detectada manipulação/IA
         - 🟢 **NATURAL**: Provavelmente foto real
-
-        ### Como funciona:
-
-        O sistema detecta automaticamente o tipo de cena (carros, vidros, reflexos)
-        e ajusta os parâmetros de análise para cada situação específica.
+        
+        ### O que o V3 detecta:
+        
+        ✅ Imagens geradas por IA (Midjourney, DALL-E, etc)
+        ✅ Fotos editadas digitalmente
+        ✅ Deepfakes e manipulações faciais
+        ✅ Artefatos de compressão anormais
+        ✅ Inconsistências de iluminação
+        ✅ Reflexos impossíveis
+        ✅ Texturas artificiais
+        
+        ### Modos de operação:
+        
+        - **Híbrido** (Técnica + IA): Máxima precisão
+        - **Técnica apenas**: Funciona sem API key
         """)
 
 st.markdown("---")
-st.caption("MirrorGlass V2 | Análise em Lote | Dezembro 2025")
+st.caption("MirrorGlass V3 | AI Enhanced Detection | Janeiro 2026")
