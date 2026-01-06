@@ -1,36 +1,60 @@
 import streamlit as st
+import os
 import numpy as np
+import matplotlib.pyplot as plt
 from PIL import Image
-import pandas as pd
-import cv2
+import io
+import base64
+import json
+from skimage.metrics import structural_similarity as ssim
+from skimage.transform import resize
 from skimage.feature import local_binary_pattern
 from skimage.restoration import estimate_sigma
-from scipy.stats import entropy
+from scipy.stats import entropy, kurtosis
+import pandas as pd
+import time
+import cv2
+from sklearn.cluster import KMeans
 from typing import Dict, List, Tuple, Any, Union
-from enum import Enum
-import base64
-import io
-import os
 
-# ============================================================================
-# OPENAI INTEGRATION
-# ============================================================================
-
+# Tentar importar OpenAI
 try:
     import openai
     OPENAI_AVAILABLE = True
 except ImportError:
     OPENAI_AVAILABLE = False
 
+# ============================================================================
+# CONFIGURAÇÃO DA PÁGINA
+# ============================================================================
+
+st.set_page_config(
+    page_title="MirrorGlass V3 - Detector de Fraudes em Imagens",
+    page_icon="🔍",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+# ============================================================================
+# OPENAI INTEGRATION
+# ============================================================================
+
 class AIAnalyzer:
-    """Integração com OpenAI Vision API para análise de manipulação"""
+    """Integração com OpenAI Vision API para análise de manipulação e duplicidade"""
     
-    def __init__(self, api_key: str = None):
-        self.api_key = api_key or os.getenv("OPENAI_API_KEY")
-        self.enabled = bool(self.api_key and OPENAI_AVAILABLE)
+    def __init__(self):
+        self.api_key = None
+        self.enabled = False
         
-        if self.enabled:
-            openai.api_key = self.api_key
+        if OPENAI_AVAILABLE:
+            try:
+                # API key já configurada no Streamlit Cloud (Settings > Secrets)
+                self.api_key = st.secrets.get("OPENAI_API_KEY", None)
+                if self.api_key:
+                    openai.api_key = self.api_key
+                    self.enabled = True
+            except Exception:
+                pass  # API não configurada, modo técnico será usado
     
     def encode_image(self, image: Union[Image.Image, np.ndarray]) -> str:
         """Converte imagem para base64"""
@@ -41,8 +65,8 @@ class AIAnalyzer:
         image.save(buffered, format="JPEG", quality=95)
         return base64.b64encode(buffered.getvalue()).decode('utf-8')
     
-    def analyze_with_gpt4(self, image: Union[Image.Image, np.ndarray]) -> Dict[str, Any]:
-        """Analisa imagem com GPT-4 Vision"""
+    def analyze_manipulation(self, image: Union[Image.Image, np.ndarray]) -> Dict[str, Any]:
+        """Analisa manipulação com GPT-4 Vision"""
         if not self.enabled:
             return {
                 'enabled': False,
@@ -79,8 +103,6 @@ class AIAnalyzer:
                                 - Distorções em objetos ou pessoas
                                 - Bordas artificiais ou desfocagem seletiva anormal
                                 - Texturas repetitivas ou não naturais
-                                - Detalhes anatômicos incorretos (em pessoas)
-                                - Perspectiva inconsistente
                                 - Compressão ou artefatos de processamento
                                 
                                 Responda em formato JSON:
@@ -107,14 +129,11 @@ class AIAnalyzer:
             result_text = response.choices[0].message.content
             
             # Parse JSON response
-            import json
-            # Extrai JSON da resposta (pode vir com texto extra)
             json_start = result_text.find('{')
             json_end = result_text.rfind('}') + 1
             if json_start != -1 and json_end > json_start:
                 result_json = json.loads(result_text[json_start:json_end])
             else:
-                # Fallback se não encontrar JSON
                 result_json = {
                     'verdict': 'DESCONHECIDO',
                     'confidence': 50,
@@ -133,554 +152,916 @@ class AIAnalyzer:
                 'explanation': f'Erro ao analisar com IA: {str(e)}',
                 'indicators': []
             }
-
-# ============================================================================
-# SCENE DETECTOR (mantido do V2)
-# ============================================================================
-
-class SceneType(Enum):
-    CAR = "CAR"
-    GLASS = "GLASS"
-    CAR_GLASS = "CAR_GLASS"
-    CAR_GLASS_REFLECTION = "CAR_GLASS_REFLECTION"
-    CAR_REFLECTION = "CAR_REFLECTION"
-    CAR_SMOOTH_WALL = "CAR_SMOOTH_WALL"
-    CAR_DOCUMENT = "CAR_DOCUMENT"
-    GLASS_REFLECTION = "GLASS_REFLECTION"
-    GLASS_WALL = "GLASS_WALL"
-    GLASS_DOCUMENT = "GLASS_DOCUMENT"
-    REFLECTION = "REFLECTION"
-    SMOOTH_WALL = "SMOOTH_WALL"
-    DOCUMENT = "DOCUMENT"
-    UNKNOWN = "UNKNOWN"
-
-class SceneDetector:
-    """Detecta tipo de cena na imagem"""
     
-    def __init__(self):
-        pass
-    
-    def detect_car(self, image: np.ndarray) -> Tuple[bool, float, List]:
-        if isinstance(image, Image.Image):
-            image = np.array(image.convert('RGB'))
-        if len(image.shape) == 3:
-            gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
-        else:
-            gray = image.copy()
-        h, w = gray.shape
-        indicators = 0
-        total_checks = 4
-        edges = cv2.Canny(gray, 50, 150)
-        lines = cv2.HoughLinesP(edges, 1, np.pi/180, 100, minLineLength=50, maxLineGap=10)
-        if lines is not None:
-            horizontal_lines = sum(1 for l in lines if abs(np.arctan2(l[0][3]-l[0][1], l[0][2]-l[0][0]) * 180 / np.pi) < 15 or abs(np.arctan2(l[0][3]-l[0][1], l[0][2]-l[0][0]) * 180 / np.pi) > 165)
-            vertical_lines = sum(1 for l in lines if 75 < abs(np.arctan2(l[0][3]-l[0][1], l[0][2]-l[0][0]) * 180 / np.pi) < 105)
-            if horizontal_lines > 5 and vertical_lines > 3:
-                indicators += 1
-        if len(image.shape) == 3:
-            hsv = cv2.cvtColor(image, cv2.COLOR_RGB2HSV)
-            metallic_mask = cv2.inRange(hsv, np.array([0, 0, 100]), np.array([180, 50, 200]))
-            if np.mean(metallic_mask > 0) > 0.15:
-                indicators += 1
-        contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        large_contours = [c for c in contours if cv2.contourArea(c) > (h * w * 0.01)]
-        for contour in large_contours[:5]:
-            x, y, cw, ch = cv2.boundingRect(contour)
-            aspect = cw / ch if ch > 0 else 0
-            if 1.5 < aspect < 4.0:
-                indicators += 1
-                break
-        confidence = indicators / total_checks
-        return confidence >= 0.5, confidence, []
-    
-    def detect_glass(self, image: np.ndarray) -> Tuple[bool, float, str]:
-        if isinstance(image, Image.Image):
-            image = np.array(image.convert('RGB'))
-        if len(image.shape) == 3:
-            gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
-        else:
-            gray = image.copy()
-        indicators = 0
-        total_checks = 4
-        h, w = gray.shape
-        block_size = 32
-        low_texture_blocks = sum(1 for i in range(0, h - block_size, block_size) for j in range(0, w - block_size, block_size) if np.std(gray[i:i+block_size, j:j+block_size]) < 20)
-        total_blocks = max(1, ((h - block_size) // block_size) * ((w - block_size) // block_size))
-        if low_texture_blocks / total_blocks > 0.3:
-            indicators += 1
-        confidence = indicators / total_checks
-        is_glass = confidence >= 0.5
-        glass_type = "window" if confidence > 0.6 else "dark_glass" if is_glass else "unknown"
-        return is_glass, confidence, glass_type
-    
-    def classify(self, image: np.ndarray) -> Tuple[Any, Dict[str, Any]]:
-        if isinstance(image, Image.Image):
-            image = np.array(image.convert('RGB'))
-        has_car, car_conf, _ = self.detect_car(image)
-        has_glass, glass_conf, glass_type = self.detect_glass(image)
+    def analyze_duplicate(self, image1: Union[Image.Image, np.ndarray], 
+                         image2: Union[Image.Image, np.ndarray]) -> Dict[str, Any]:
+        """Analisa se duas imagens são duplicatas/espelhamentos com GPT-4 Vision"""
+        if not self.enabled:
+            return {
+                'enabled': False,
+                'is_duplicate': False,
+                'confidence': 0,
+                'explanation': 'API OpenAI não configurada',
+                'relationship': 'unknown'
+            }
         
-        detection_info = {
-            "car": {"detected": has_car, "confidence": car_conf},
-            "glass": {"detected": has_glass, "confidence": glass_conf, "type": glass_type}
-        }
-        
-        if has_car and has_glass:
-            scene_type = SceneType.CAR_GLASS
-        elif has_car:
-            scene_type = SceneType.CAR
-        elif has_glass:
-            scene_type = SceneType.GLASS
-        else:
-            scene_type = SceneType.UNKNOWN
+        try:
+            base64_image1 = self.encode_image(image1)
+            base64_image2 = self.encode_image(image2)
             
-        return scene_type, detection_info
+            response = openai.ChatCompletion.create(
+                model="gpt-4-vision-preview",
+                messages=[
+                    {
+                        "role": "system",
+                        "content": """Você é um especialista em análise forense de imagens. 
+                        Sua tarefa é identificar se duas imagens são duplicatas, espelhamentos ou relacionadas."""
+                    },
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": """Compare estas duas imagens e determine:
+                                
+                                1. São a MESMA imagem (idênticas)?
+                                2. São ESPELHAMENTOS (mirror/flip)?
+                                3. São RECORTES (uma é parte da outra)?
+                                4. São DUPLICATAS COM EDIÇÕES (mesma base, editadas)?
+                                5. São DIFERENTES (não relacionadas)?
+                                
+                                Analise:
+                                - Objetos principais
+                                - Composição da cena
+                                - Cores e iluminação
+                                - Texturas e detalhes
+                                - Ângulo e perspectiva
+                                
+                                Responda em formato JSON:
+                                {
+                                  "is_duplicate": true/false,
+                                  "confidence": 0-100,
+                                  "relationship": "identical/mirror/crop/edited/different",
+                                  "explanation": "explicação detalhada em português"
+                                }"""
+                            },
+                            {
+                                "type": "text",
+                                "text": "Imagem 1:"
+                            },
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:image/jpeg;base64,{base64_image1}"
+                                }
+                            },
+                            {
+                                "type": "text",
+                                "text": "Imagem 2:"
+                            },
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:image/jpeg;base64,{base64_image2}"
+                                }
+                            }
+                        ]
+                    }
+                ],
+                max_tokens=800,
+                temperature=0.3
+            )
+            
+            result_text = response.choices[0].message.content
+            
+            # Parse JSON response
+            json_start = result_text.find('{')
+            json_end = result_text.rfind('}') + 1
+            if json_start != -1 and json_end > json_start:
+                result_json = json.loads(result_text[json_start:json_end])
+            else:
+                result_json = {
+                    'is_duplicate': False,
+                    'confidence': 50,
+                    'relationship': 'unknown',
+                    'explanation': result_text
+                }
+            
+            result_json['enabled'] = True
+            return result_json
+            
+        except Exception as e:
+            return {
+                'enabled': True,
+                'is_duplicate': False,
+                'confidence': 0,
+                'relationship': 'error',
+                'explanation': f'Erro ao analisar com IA: {str(e)}'
+            }
 
 # ============================================================================
-# TEXTURE ANALYZER (mantido e melhorado)
+# TEXTURE ANALYZER (do código original)
 # ============================================================================
 
 class TextureAnalyzer:
-    """Análise técnica de textura, bordas, ruído, etc."""
+    """
+    Classe para análise de texturas usando Local Binary Pattern (LBP).
+    Detecta manipulações em imagens automotivas, principalmente restaurações por IA.
+    """
     
-    def __init__(self):
-        self.scene_detector = SceneDetector()
+    def __init__(self, P=8, R=1, block_size=8, threshold=0.10):
+        self.P = P
+        self.R = R
+        self.block_size = block_size
+        self.threshold = threshold
+        self.scales = [0.5, 1.0, 2.0]
     
-    def analyze_texture(self, image_gray: np.ndarray) -> float:
-        if image_gray.size == 0:
-            return 0.0
-        lbp = local_binary_pattern(image_gray, 8, 1, method='uniform')
-        hist, _ = np.histogram(lbp.ravel(), bins=59, range=(0, 59))
-        hist = hist.astype(float) / hist.sum()
-        texture_score = 1.0 - entropy(hist + 1e-10) / np.log(59)
-        return float(np.clip(texture_score, 0, 1))
-    
-    def analyze_edges(self, image_gray: np.ndarray) -> float:
-        if image_gray.dtype != np.uint8:
-            image_gray = np.clip(image_gray, 0, 255).astype(np.uint8)
-        edges = cv2.Canny(image_gray, 50, 150)
-        edge_density = np.mean(edges > 0)
-        laplacian = cv2.Laplacian(image_gray, cv2.CV_64F)
-        laplacian_var = np.var(laplacian)
-        edge_score = (edge_density * 0.5) + (min(laplacian_var / 1000, 1.0) * 0.5)
-        return float(np.clip(edge_score, 0, 1))
-    
-    def analyze_noise(self, image_gray: np.ndarray) -> float:
-        if image_gray.dtype != np.uint8:
-            image_gray = np.clip(image_gray, 0, 255).astype(np.uint8)
-        sigma = estimate_sigma(image_gray, channel_axis=None, average_sigmas=True)
-        noise_score = min(sigma / 25.0, 1.0)
-        return float(np.clip(noise_score, 0, 1))
-    
-    def analyze_lighting(self, image_gray: np.ndarray) -> float:
-        if image_gray.size == 0:
-            return 0.0
-        mean_intensity = np.mean(image_gray)
-        std_intensity = np.std(image_gray)
-        brightness_score = 1.0 - abs(mean_intensity - 128) / 128
-        contrast_score = min(std_intensity / 64, 1.0)
-        lighting_score = (brightness_score * 0.5) + (contrast_score * 0.5)
-        return float(np.clip(lighting_score, 0, 1))
-    
-    def analyze(self, image: Union[Image.Image, np.ndarray]) -> Dict[str, Any]:
-        """Análise técnica tradicional"""
+    def calculate_lbp(self, image):
         if isinstance(image, Image.Image):
-            image_np = np.array(image.convert('RGB'))
+            img_gray = np.array(image.convert('L'))
+        elif len(image.shape) > 2:
+            img_gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
         else:
-            image_np = image
+            img_gray = image
+            
+        lbp = local_binary_pattern(img_gray, self.P, self.R, method="uniform")
         
-        gray = cv2.cvtColor(image_np, cv2.COLOR_RGB2GRAY) if len(image_np.shape) == 3 else image_np
+        n_bins = self.P + 2
+        hist, _ = np.histogram(lbp.ravel(), bins=n_bins, range=(0, n_bins))
+        hist = hist.astype("float")
+        hist /= (hist.sum() + 1e-7)
         
-        scene_type, detection_info = self.scene_detector.classify(image_np)
+        return lbp, hist, img_gray
+    
+    def analyze_texture_variance(self, image):
+        """Análise detalhada de textura para detectar manipulações por IA"""
+        if isinstance(image, Image.Image):
+            image = np.array(image)
         
-        texture_score = self.analyze_texture(gray)
-        edge_score = self.analyze_edges(gray)
-        noise_score = self.analyze_noise(gray)
-        lighting_score = self.analyze_lighting(gray)
+        if len(image.shape) > 2:
+            img_gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
+        else:
+            img_gray = image.copy()
         
-        weights = {'texture': 0.30, 'edge': 0.30, 'noise': 0.20, 'lighting': 0.20}
+        # 1. Detecção de bordas
+        sobel_x = cv2.Sobel(img_gray, cv2.CV_64F, 1, 0, ksize=3)
+        sobel_y = cv2.Sobel(img_gray, cv2.CV_64F, 0, 1, ksize=3)
+        gradient_magnitude = np.sqrt(sobel_x**2 + sobel_y**2)
+        gradient_magnitude = cv2.normalize(gradient_magnitude, None, 0, 1, cv2.NORM_MINMAX)
+        edges = cv2.Canny(img_gray, 50, 150)
         
-        all_scores = {
-            'texture': round(texture_score * 100, 2),
-            'edge': round(edge_score * 100, 2),
-            'noise': round(noise_score * 100, 2),
-            'lighting': round(lighting_score * 100, 2)
+        # 2. Filtro de mediana
+        img_filtered = cv2.medianBlur(img_gray, 5)
+        
+        # 3. LBP em múltiplas escalas
+        lbp_maps = []
+        blurred_maps = []
+        
+        for scale in self.scales:
+            if scale != 1.0:
+                height, width = img_gray.shape
+                new_height, new_width = int(height * scale), int(width * scale)
+                img_scaled = cv2.resize(img_gray, (new_width, new_height))
+                blurred = cv2.GaussianBlur(img_scaled, (5, 5), 0)
+                lbp_scaled, _, _ = self.calculate_lbp(blurred)
+                lbp_map = cv2.resize(lbp_scaled, (width, height))
+            else:
+                lbp_map, _, _ = self.calculate_lbp(img_gray)
+            
+            lbp_maps.append(lbp_map)
+            
+            for sigma in [1, 3, 5]:
+                blurred = cv2.GaussianBlur(img_gray, (sigma*2+1, sigma*2+1), sigma)
+                blurred_maps.append(blurred)
+        
+        # 4. Análise em blocos
+        height, width = img_gray.shape
+        rows = max(1, height // self.block_size)
+        cols = max(1, width // self.block_size)
+        
+        variance_map = np.zeros((rows, cols))
+        entropy_map = np.zeros((rows, cols))
+        gradient_consistency_map = np.zeros((rows, cols))
+        edge_density_map = np.zeros((rows, cols))
+        blur_consistency_map = np.zeros((rows, cols))
+        
+        for i in range(0, height - self.block_size + 1, self.block_size):
+            for j in range(0, width - self.block_size + 1, self.block_size):
+                block_gray = img_gray[i:i+self.block_size, j:j+self.block_size]
+                if i < lbp_maps[1].shape[0] - self.block_size and j < lbp_maps[1].shape[1] - self.block_size:
+                    block_lbp = lbp_maps[1][i:i+self.block_size, j:j+self.block_size]
+                else:
+                    continue
+                
+                block_gradient = gradient_magnitude[i:i+self.block_size, j:j+self.block_size]
+                block_edges = edges[i:i+self.block_size, j:j+self.block_size]
+                
+                # Entropia LBP
+                hist, _ = np.histogram(block_lbp, bins=10, range=(0, 10))
+                hist = hist.astype("float")
+                hist /= (hist.sum() + 1e-7)
+                block_entropy = entropy(hist)
+                max_entropy = np.log(10)
+                norm_entropy = block_entropy / max_entropy if max_entropy > 0 else 0
+                
+                # Variância da textura
+                block_variance = np.var(block_lbp) / 255.0
+                
+                # Consistência do gradiente
+                grad_hist, _ = np.histogram(block_gradient, bins=8)
+                grad_hist = grad_hist.astype("float")
+                grad_hist /= (grad_hist.sum() + 1e-7)
+                grad_entropy = entropy(grad_hist)
+                grad_consistency = 1.0 - (grad_entropy / np.log(8))
+                
+                # Densidade de bordas
+                edge_density = np.sum(block_edges > 0) / (self.block_size * self.block_size)
+                
+                # Consistência do blur
+                blur_responses = []
+                for blurred in blurred_maps:
+                    blur_block = blurred[i:i+self.block_size, j:j+self.block_size]
+                    diff = np.abs(block_gray.astype(float) - blur_block.astype(float)).mean()
+                    blur_responses.append(diff)
+                
+                blur_consistency = 1.0 - min(np.std(blur_responses) / 10.0, 1.0)
+                
+                row_idx = i // self.block_size
+                col_idx = j // self.block_size
+                
+                if row_idx < rows and col_idx < cols:
+                    variance_map[row_idx, col_idx] = block_variance
+                    entropy_map[row_idx, col_idx] = norm_entropy
+                    gradient_consistency_map[row_idx, col_idx] = grad_consistency
+                    edge_density_map[row_idx, col_idx] = edge_density
+                    blur_consistency_map[row_idx, col_idx] = blur_consistency
+        
+        # 5. Combinar métricas
+        weights = {
+            'entropy': 0.20,
+            'variance': 0.15,
+            'gradient': 0.15,
+            'edge_density': 0.20,
+            'blur_consistency': 0.30
         }
         
-        weighted_score = (
-            texture_score * weights['texture'] +
-            edge_score * weights['edge'] +
-            noise_score * weights['noise'] +
-            lighting_score * weights['lighting']
+        naturalness_map = (
+            (1.0 - weights['entropy'] * (1.0 - entropy_map)) *
+            (1.0 - weights['variance'] * (1.0 - variance_map)) *
+            (1.0 - weights['gradient'] * gradient_consistency_map) *
+            (1.0 - weights['edge_density'] * (1.0 - edge_density_map)) *
+            (1.0 - weights['blur_consistency'] * blur_consistency_map)
         )
         
-        confidence = int(weighted_score * 100)
-        verdict = "MANIPULADA" if weighted_score > 0.5 else "NATURAL"
+        norm_naturalness_map = cv2.normalize(naturalness_map, None, 0, 1, cv2.NORM_MINMAX)
+        suspicious_mask = norm_naturalness_map < self.threshold
+        naturalness_score = int(np.mean(norm_naturalness_map) * 100)
+        
+        heatmap = cv2.applyColorMap(
+            (norm_naturalness_map * 255).astype(np.uint8), 
+            cv2.COLORMAP_JET
+        )
         
         return {
-            'verdict': verdict,
-            'confidence': confidence,
-            'scene_type': scene_type.value,
-            'all_scores': all_scores,
-            'detection_info': detection_info,
-            'technical_score': weighted_score
+            "naturalness_map": norm_naturalness_map,
+            "suspicious_mask": suspicious_mask,
+            "naturalness_score": naturalness_score,
+            "heatmap": heatmap,
+            "entropy_map": entropy_map,
+            "variance_map": variance_map,
+            "edge_density_map": edge_density_map
         }
-
-# ============================================================================
-# HYBRID ANALYZER - Combina análise técnica + IA
-# ============================================================================
-
-class MirrorGlassV3:
-    """Sistema híbrido: Análise Técnica + OpenAI Vision"""
     
-    def __init__(self, api_key: str = None, use_ai: bool = True):
-        self.texture_analyzer = TextureAnalyzer()
-        self.ai_analyzer = AIAnalyzer(api_key) if use_ai else None
-        self.use_ai = use_ai and (self.ai_analyzer is not None) and self.ai_analyzer.enabled
+    def classify_naturalness(self, score):
+        if score <= 45:
+            return "Alta chance de manipulação", "Textura artificial detectada"
+        elif score <= 70:
+            return "Textura suspeita", "Revisão manual sugerida"
+        else:
+            return "Textura natural", "Baixa chance de manipulação"
     
-    def combine_verdicts(self, technical: Dict, ai: Dict) -> Dict[str, Any]:
-        """Combina vereditos técnico e de IA"""
+    def generate_visual_report(self, image, analysis_results):
+        if isinstance(image, Image.Image):
+            image = np.array(image.convert('RGB'))
         
-        # Se IA não está ativa, retorna apenas técnico
-        if not ai.get('enabled', False):
+        naturalness_map = analysis_results["naturalness_map"]
+        suspicious_mask = analysis_results["suspicious_mask"]
+        score = analysis_results["naturalness_score"]
+        
+        height, width = image.shape[:2]
+        
+        naturalness_map_resized = cv2.resize(naturalness_map, 
+                                           (width, height), 
+                                           interpolation=cv2.INTER_LINEAR)
+        
+        mask_resized = cv2.resize(suspicious_mask.astype(np.uint8), 
+                                 (width, height), 
+                                 interpolation=cv2.INTER_NEAREST)
+        
+        heatmap = cv2.applyColorMap((naturalness_map_resized * 255).astype(np.uint8), 
+                                    cv2.COLORMAP_JET)
+        
+        overlay = cv2.addWeighted(image, 0.6, heatmap, 0.4, 0)
+        
+        highlighted = overlay.copy()
+        contours, _ = cv2.findContours(mask_resized, cv2.RETR_EXTERNAL, 
+                                       cv2.CHAIN_APPROX_SIMPLE)
+        
+        for contour in contours:
+            area = cv2.contourArea(contour)
+            if area > 50:
+                x, y, w, h = cv2.boundingRect(contour)
+                cv2.rectangle(highlighted, (x, y), (x+w, y+h), (128, 0, 128), 2)
+        
+        category, description = self.classify_naturalness(score)
+        
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        cv2.putText(highlighted, f"Score: {score}/100", (10, 30), font, 0.7, (255, 255, 255), 2)
+        cv2.putText(highlighted, category, (10, 60), font, 0.7, (255, 255, 255), 2)
+        
+        return highlighted, heatmap
+    
+    def analyze_image(self, image):
+        try:
+            analysis_results = self.analyze_texture_variance(image)
+            visual_report, heatmap = self.generate_visual_report(image, analysis_results)
+            
+            score = analysis_results.get("naturalness_score", 0)
+            category, description = self.classify_naturalness(score)
+            
+            suspicious_mask = analysis_results.get("suspicious_mask")
+            percentual_suspeito = float(np.mean(suspicious_mask) * 100) if suspicious_mask is not None else 0.0
+            
             return {
-                **technical,
-                'analysis_mode': 'Técnica apenas',
-                'reason': 'Análise baseada em características técnicas da imagem'
+                "score": score,
+                "category": category,
+                "description": description,
+                "percentual_suspeito": percentual_suspeito,
+                "visual_report": visual_report,
+                "heatmap": heatmap,
+                "analysis_results": analysis_results
             }
+        except Exception as e:
+            return {
+                "score": 0,
+                "category": "Erro",
+                "description": f"Erro na análise: {str(e)}",
+                "percentual_suspeito": 0,
+                "visual_report": None,
+                "heatmap": None,
+                "analysis_results": {}
+            }
+
+# ============================================================================
+# DUPLICATE DETECTOR (do código original)
+# ============================================================================
+
+def preprocessar_imagem(img, tamanho=(300, 300)):
+    try:
+        img_resize = img.resize(tamanho)
+        img_gray = img_resize.convert('L')
+        img_array = np.array(img_gray)
+        img_array = img_array / 255.0
+        img_cv = np.array(img_resize)
+        img_cv = img_cv[:, :, ::-1].copy()
+        return img_array, img_cv
+    except Exception as e:
+        st.error(f"Erro ao processar imagem: {e}")
+        return None, None
+
+def calcular_similaridade_ssim(img1, img2):
+    try:
+        if img1.shape != img2.shape:
+            img2 = resize(img2, img1.shape)
         
-        # Normaliza vereditos
-        tech_is_manipulated = technical['verdict'] == 'MANIPULADA'
-        ai_is_manipulated = ai['verdict'] == 'MANIPULADA'
+        score = ssim(img1, img2, data_range=1.0)
+        return score
+    except Exception as e:
+        return 0
+
+def calcular_similaridade_sift(img1_cv, img2_cv):
+    try:
+        img1_gray = cv2.cvtColor(img1_cv, cv2.COLOR_BGR2GRAY)
+        img2_gray = cv2.cvtColor(img2_cv, cv2.COLOR_BGR2GRAY)
         
-        # Confiança combinada (média ponderada: 40% técnica, 60% IA)
-        tech_conf = technical['confidence'] / 100.0
-        ai_conf = ai['confidence'] / 100.0
+        sift = cv2.SIFT_create()
         
-        combined_conf = (tech_conf * 0.4 + ai_conf * 0.6)
+        kp1, des1 = sift.detectAndCompute(img1_gray, None)
+        kp2, des2 = sift.detectAndCompute(img2_gray, None)
         
-        # Veredito final
-        if tech_is_manipulated and ai_is_manipulated:
-            final_verdict = "MANIPULADA"
-            reason = f"🔴 Ambas análises concordam: {ai.get('explanation', '')}"
-        elif not tech_is_manipulated and not ai_is_manipulated:
-            final_verdict = "NATURAL"
-            reason = f"🟢 Ambas análises concordam: {ai.get('explanation', '')}"
-        elif ai_is_manipulated and ai_conf > 0.7:
-            # IA tem alta confiança em manipulação
-            final_verdict = "MANIPULADA"
-            combined_conf = ai_conf * 0.9  # Prioriza IA
-            reason = f"⚠️ IA detectou manipulação com alta confiança: {ai.get('explanation', '')}"
-        elif tech_is_manipulated and tech_conf > 0.7:
-            # Técnica tem alta confiança
-            final_verdict = "MANIPULADA"
-            combined_conf = tech_conf * 0.85
-            reason = f"⚠️ Análise técnica detectou anomalias. IA sugere: {ai.get('explanation', '')}"
+        if des1 is None or des2 is None or len(des1) < 2 or len(des2) < 2:
+            return 0
+            
+        FLANN_INDEX_KDTREE = 1
+        index_params = dict(algorithm=FLANN_INDEX_KDTREE, trees=5)
+        search_params = dict(checks=50)
+        flann = cv2.FlannBasedMatcher(index_params, search_params)
+        
+        matches = flann.knnMatch(des1, des2, k=2)
+        
+        good_matches = []
+        for m, n in matches:
+            if m.distance < 0.7 * n.distance:
+                good_matches.append(m)
+        
+        max_matches = min(len(kp1), len(kp2))
+        if max_matches == 0:
+            return 0
+            
+        similarity = len(good_matches) / max_matches
+        
+        if similarity < 0.05:
+            adjusted_similarity = 0
         else:
-            # Conflito com baixa confiança - usa média
-            final_verdict = "MANIPULADA" if combined_conf > 0.5 else "NATURAL"
-            reason = f"⚠️ Análises divergentes. IA: {ai.get('explanation', '')}"
+            adjusted_similarity = min(1.0, similarity * 2)
         
-        return {
-            **technical,
-            'verdict': final_verdict,
-            'confidence': int(combined_conf * 100),
-            'reason': reason,
-            'ai_analysis': ai,
-            'technical_confidence': technical['confidence'],
-            'ai_confidence': ai['confidence'],
-            'analysis_mode': 'Híbrida (Técnica + IA)',
-            'ai_indicators': ai.get('indicators', [])
-        }
+        return adjusted_similarity
+        
+    except Exception as e:
+        return 0
+
+def detectar_duplicatas(imagens, nomes, limiar=0.5, metodo="SIFT + SSIM", ai_analyzer=None):
+    progress_bar = st.progress(0)
+    status_text = st.empty()
     
-    def analyze(self, image: Union[Image.Image, np.ndarray]) -> Dict[str, Any]:
-        """Análise completa: técnica + IA"""
+    status_text.text("Extraindo características das imagens...")
+    arrays_processados_gray = []
+    arrays_processados_cv = []
+    indices_validos = []
+    
+    for i, img in enumerate(imagens):
+        progress = (i + 1) / len(imagens)
+        progress_bar.progress(progress)
+        status_text.text(f"Processando imagem {i+1} de {len(imagens)}: {nomes[i]}")
         
-        # 1. Análise técnica (sempre executa)
-        technical_result = self.texture_analyzer.analyze(image)
+        img_array_gray, img_array_cv = preprocessar_imagem(img)
+        if img_array_gray is not None:
+            arrays_processados_gray.append(img_array_gray)
+            arrays_processados_cv.append(img_array_cv)
+            indices_validos.append(i)
+    
+    if not arrays_processados_gray:
+        status_text.error("Nenhuma imagem válida para processamento.")
+        progress_bar.empty()
+        return None
+    
+    status_text.text("Comparando imagens e buscando duplicatas...")
+    duplicatas = {}
+    
+    total_comparacoes = len(arrays_processados_gray) * (len(arrays_processados_gray) - 1) // 2
+    comparacao_atual = 0
+    
+    for i in range(len(arrays_processados_gray)):
+        similares = []
+        for j in range(i + 1, len(arrays_processados_gray)):
+            comparacao_atual += 1
+            
+            if total_comparacoes > 0:
+                progress = min(max(comparacao_atual / total_comparacoes, 0.0), 1.0)
+                progress_bar.progress(progress)
+            
+            # Análise técnica
+            if metodo == "SSIM":
+                similaridade_tecnica = calcular_similaridade_ssim(
+                    arrays_processados_gray[i], 
+                    arrays_processados_gray[j]
+                )
+            elif metodo == "SIFT":
+                similaridade_tecnica = calcular_similaridade_sift(
+                    arrays_processados_cv[i], 
+                    arrays_processados_cv[j]
+                )
+            else:  # SIFT + SSIM
+                sim_ssim = calcular_similaridade_ssim(
+                    arrays_processados_gray[i], 
+                    arrays_processados_gray[j]
+                )
+                sim_sift = calcular_similaridade_sift(
+                    arrays_processados_cv[i], 
+                    arrays_processados_cv[j]
+                )
+                similaridade_tecnica = (sim_ssim * 0.3) + (sim_sift * 0.7)
+            
+            # Análise com IA (se disponível)
+            ai_result = None
+            if ai_analyzer and ai_analyzer.enabled and similaridade_tecnica > (limiar * 0.7):
+                ai_result = ai_analyzer.analyze_duplicate(
+                    imagens[indices_validos[i]], 
+                    imagens[indices_validos[j]]
+                )
+            
+            # Combinar resultados
+            if ai_result and ai_result.get('enabled'):
+                # Média ponderada: 40% técnica, 60% IA
+                ai_confidence = ai_result.get('confidence', 0) / 100
+                similaridade_final = (similaridade_tecnica * 0.4) + (ai_confidence * 0.6)
+                
+                if similaridade_final >= limiar or ai_result.get('is_duplicate'):
+                    similares.append((
+                        indices_validos[j], 
+                        similaridade_final,
+                        ai_result.get('relationship', 'unknown'),
+                        ai_result.get('explanation', '')
+                    ))
+            else:
+                # Apenas análise técnica
+                if similaridade_tecnica >= limiar:
+                    similares.append((
+                        indices_validos[j], 
+                        similaridade_tecnica,
+                        'technical_only',
+                        'Análise técnica apenas'
+                    ))
         
-        # 2. Análise com IA (se habilitada)
-        if self.use_ai:
-            ai_result = self.ai_analyzer.analyze_with_gpt4(image)
-        else:
-            ai_result = {'enabled': False}
-        
-        # 3. Combina resultados
-        final_result = self.combine_verdicts(technical_result, ai_result)
-        
-        return final_result
+        if similares:
+            duplicatas[indices_validos[i]] = similares
+    
+    progress_bar.empty()
+    status_text.text("Processamento concluído!")
+    
+    return duplicatas
 
 # ============================================================================
-# STREAMLIT APP
+# INTERFACE STREAMLIT
 # ============================================================================
 
-st.set_page_config(
-    page_title="MirrorGlass V3 - AI Enhanced",
-    page_icon="🔍",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
+# Título
+st.title("🔍 MirrorGlass V3 - Detector de Fraudes em Imagens")
+st.markdown("""
+Sistema avançado de detecção de fraudes utilizando:
+- 🤖 **Análise com IA (GPT-4 Vision)** - Detecta manipulações sutis e contexto
+- 🔧 **Análise Técnica (LBP + SIFT + SSIM)** - Análise matemática de texturas e duplicatas
+- 🔄 **Sistema Híbrido** - Combina ambas para máxima precisão
+""")
 
-# Configuração da API na sidebar
+# Sidebar
 with st.sidebar:
-    st.title("⚙️ MirrorGlass V3")
-    st.markdown("### 🤖 AI Enhanced Detection")
+    st.title("⚙️ Configurações")
+    
+    # Status da API OpenAI
+    ai_analyzer = AIAnalyzer()
     
     st.markdown("---")
+    st.subheader("🤖 Status da IA")
     
-    # Configuração OpenAI
-    st.subheader("🔑 OpenAI API")
-    
-    api_key_input = st.text_input(
-        "API Key",
-        type="password",
-        help="Cole sua chave da API OpenAI aqui. Deixe vazio para usar apenas análise técnica."
-    )
-    
-    use_ai = st.checkbox(
-        "Ativar Análise com IA",
-        value=bool(api_key_input or os.getenv("OPENAI_API_KEY")),
-        help="Usa GPT-4 Vision para análise complementar"
-    )
-    
-    if use_ai and not api_key_input and not os.getenv("OPENAI_API_KEY"):
-        st.warning("⚠️ Configure a API Key para usar IA")
-    elif use_ai:
-        st.success("✅ IA Ativada")
+    if ai_analyzer.enabled:
+        st.success("✅ OpenAI API Ativa")
+        st.caption("GPT-4 Vision disponível")
     else:
-        st.info("ℹ️ Modo técnico apenas")
+        st.warning("⚠️ OpenAI API Desativada")
+        st.caption("Modo técnico disponível")
     
     st.markdown("---")
     
-    # Configurações de exibição
-    st.subheader("📊 Exibição")
-    show_details = st.checkbox("Mostrar Detalhes Técnicos", value=True)
-    cols_per_row = st.slider("Imagens por linha", 1, 4, 2)
+    # Modo de análise
+    modo_analise = st.radio(
+        "Modo de Análise",
+        ["Duplicidade", "Manipulação por IA", "Análise Completa"],
+        help="Escolha o tipo de análise"
+    )
     
-    st.markdown("---")
+    # Configurações de duplicidade
+    if modo_analise in ["Duplicidade", "Análise Completa"]:
+        st.subheader("Detecção de Duplicidade")
+        
+        limiar_similaridade = st.slider(
+            "Limiar de Similaridade (%)", 
+            min_value=30, 
+            max_value=100, 
+            value=50,
+            help="Imagens com similaridade acima deste valor serão consideradas duplicatas"
+        )
+        limiar_similaridade = limiar_similaridade / 100
+        
+        metodo_deteccao = st.selectbox(
+            "Método Técnico",
+            ["SIFT + SSIM", "SIFT", "SSIM"],
+            help="Método para detecção técnica"
+        )
+        
+        usar_ia_duplicidade = st.checkbox(
+            "Usar IA para Duplicidade",
+            value=ai_analyzer.enabled,
+            disabled=not ai_analyzer.enabled,
+            help="GPT-4 Vision analisa contexto e relacionamento"
+        )
     
-    # Informações
-    with st.expander("ℹ️ Sobre"):
-        st.markdown("""
-        **MirrorGlass V3** combina:
+    # Configurações de manipulação
+    if modo_analise in ["Manipulação por IA", "Análise Completa"]:
+        st.subheader("Detecção de Manipulação")
         
-        - 🔧 Análise técnica tradicional
-        - 🤖 GPT-4 Vision (OpenAI)
+        tamanho_bloco = st.slider(
+            "Tamanho do Bloco", 
+            min_value=8, 
+            max_value=32, 
+            value=16,
+            step=4,
+            help="Menor = mais sensível"
+        )
         
-        **Vantagens:**
-        - Detecta manipulações sutis
-        - Identifica IA generativa
-        - Explica os achados
-        - Maior precisão
-        """)
-
-# Interface principal
-st.title("🔍 MirrorGlass V3")
-st.markdown("### Detector de Manipulação com IA")
+        threshold_lbp = st.slider(
+            "Sensibilidade LBP", 
+            min_value=0.1, 
+            max_value=0.5, 
+            value=0.35,
+            step=0.05,
+            help="Menor = mais sensível"
+        )
+        
+        usar_ia_manipulacao = st.checkbox(
+            "Usar IA para Manipulação",
+            value=ai_analyzer.enabled,
+            disabled=not ai_analyzer.enabled,
+            help="GPT-4 Vision detecta padrões de IA generativa"
+        )
 
 # Upload de arquivos
+st.markdown("### 📤 Upload de Imagens")
 uploaded_files = st.file_uploader(
-    "📤 Arraste suas imagens aqui",
-    type=['jpg', 'jpeg', 'png'],
+    "Arraste suas imagens aqui",
     accept_multiple_files=True,
-    help="Selecione uma ou mais imagens para análise"
+    type=['jpg', 'jpeg', 'png']
 )
 
 if uploaded_files:
-    st.markdown("---")
-    st.markdown(f"### 📁 {len(uploaded_files)} imagem(ns) carregada(s)")
+    st.write(f"✅ {len(uploaded_files)} imagem(ns) carregada(s)")
     
-    if st.button("🚀 Analisar Todas", type="primary", use_container_width=True):
+    if st.button("🚀 Iniciar Análise", type="primary", use_container_width=True):
+        # Carregar imagens
+        imagens = []
+        nomes = []
         
-        # Inicializa o analisador
-        analyzer = MirrorGlassV3(
-            api_key=api_key_input,
-            use_ai=use_ai
-        )
+        for arquivo in uploaded_files:
+            try:
+                img = Image.open(arquivo).convert('RGB')
+                imagens.append(img)
+                nomes.append(arquivo.name)
+            except Exception as e:
+                st.error(f"Erro ao abrir {arquivo.name}: {e}")
         
-        results = []
-        progress_bar = st.progress(0)
-        status_text = st.empty()
-        
-        for idx, uploaded_file in enumerate(uploaded_files):
-            status_text.text(f"Analisando {idx + 1}/{len(uploaded_files)}: {uploaded_file.name}")
+        # ===== DUPLICIDADE =====
+        if modo_analise in ["Duplicidade", "Análise Completa"]:
+            st.markdown("---")
+            st.markdown("## 🔄 Análise de Duplicidade")
             
-            image = Image.open(uploaded_file).convert('RGB')
-            image_np = np.array(image)
-            
-            # Análise
-            result = analyzer.analyze(image)
-            
-            result['image'] = image
-            result['image_np'] = image_np
-            result['filename'] = uploaded_file.name
-            results.append(result)
-            
-            progress_bar.progress((idx + 1) / len(uploaded_files))
-        
-        status_text.empty()
-        progress_bar.empty()
-        
-        st.session_state.results = results
-        st.success(f"✅ Análise concluída! {len(results)} imagens processadas.")
-
-# Exibição dos resultados
-if 'results' in st.session_state and st.session_state.results:
-    results = st.session_state.results
-    
-    st.markdown("---")
-    st.markdown("## 📊 Resumo Geral")
-    
-    manipuladas = sum(1 for r in results if r['verdict'] == 'MANIPULADA')
-    naturais = sum(1 for r in results if r['verdict'] == 'NATURAL')
-    avg_confidence = int(np.mean([r['confidence'] for r in results]))
-    
-    col1, col2, col3, col4 = st.columns(4)
-    
-    with col1:
-        st.metric("Total", len(results))
-    with col2:
-        st.metric("🔴 Manipuladas", manipuladas)
-    with col3:
-        st.metric("🟢 Naturais", naturais)
-    with col4:
-        st.metric("Confiança Média", f"{avg_confidence}%")
-    
-    # Filtros
-    st.markdown("---")
-    filter_option = st.radio(
-        "Filtrar por:",
-        ["Todas", "🔴 Manipuladas", "🟢 Naturais"],
-        horizontal=True
-    )
-    
-    if filter_option == "🔴 Manipuladas":
-        filtered_results = [r for r in results if r['verdict'] == 'MANIPULADA']
-    elif filter_option == "🟢 Naturais":
-        filtered_results = [r for r in results if r['verdict'] == 'NATURAL']
-    else:
-        filtered_results = results
-    
-    st.markdown(f"### Exibindo {len(filtered_results)} imagem(ns)")
-    
-    # Exibir resultados
-    for i in range(0, len(filtered_results), cols_per_row):
-        cols = st.columns(cols_per_row)
-        
-        for j, col in enumerate(cols):
-            if i + j < len(filtered_results):
-                result = filtered_results[i + j]
+            try:
+                duplicatas = detectar_duplicatas(
+                    imagens, 
+                    nomes, 
+                    limiar_similaridade, 
+                    metodo_deteccao,
+                    ai_analyzer if usar_ia_duplicidade else None
+                )
                 
-                with col:
-                    # Imagem
-                    st.image(result['image'], caption=result['filename'], use_column_width=True)
+                if duplicatas:
+                    total_duplicatas = sum(len(similares) for similares in duplicatas.values())
+                    st.metric("Duplicatas Encontradas", total_duplicatas)
                     
-                    # Veredito
-                    verdict = result['verdict']
-                    confidence = result['confidence']
+                    # Exibir duplicatas
+                    relatorio_duplicatas = []
                     
-                    if verdict == "MANIPULADA":
-                        st.error(f"🔴 **{verdict}** ({confidence}%)")
-                    else:
-                        st.success(f"🟢 **{verdict}** ({confidence}%)")
-                    
-                    # Modo de análise
-                    st.caption(f"🔬 {result.get('analysis_mode', 'N/A')}")
-                    
-                    # Razão
-                    with st.expander("💡 Explicação"):
-                        st.write(result.get('reason', 'N/A'))
-                    
-                    # Detalhes técnicos
-                    if show_details:
-                        with st.expander("📊 Detalhes Técnicos"):
-                            st.write(f"**Cena:** {result.get('scene_type', 'N/A')}")
+                    for idx, (img_orig_idx, similares) in enumerate(duplicatas.items()):
+                        st.write("---")
+                        st.subheader(f"Grupo #{idx+1}")
+                        
+                        cols = st.columns(min(len(similares) + 1, 3))
+                        
+                        with cols[0]:
+                            st.image(imagens[img_orig_idx], caption=f"Original: {nomes[img_orig_idx]}", use_column_width=True)
+                        
+                        for i, similar_data in enumerate(similares):
+                            col_index = (i + 1) % len(cols)
                             
-                            scores = result.get('all_scores', {})
-                            st.write(f"**Textura:** {scores.get('texture', 'N/A')}%")
-                            st.write(f"**Bordas:** {scores.get('edge', 'N/A')}%")
-                            st.write(f"**Ruído:** {scores.get('noise', 'N/A')}%")
-                            st.write(f"**Iluminação:** {scores.get('lighting', 'N/A')}%")
+                            if col_index == 0 and i > 0:
+                                cols = st.columns(min(len(similares) - i + 1, 3))
                             
-                            if 'ai_analysis' in result and result['ai_analysis'].get('enabled'):
-                                st.markdown("---")
-                                st.write("**Análise IA:**")
-                                st.write(f"Confiança: {result.get('ai_confidence', 'N/A')}%")
+                            with cols[col_index]:
+                                similar_idx = similar_data[0]
+                                similaridade = similar_data[1]
+                                relationship = similar_data[2] if len(similar_data) > 2 else 'unknown'
+                                explanation = similar_data[3] if len(similar_data) > 3 else ''
                                 
-                                indicators = result.get('ai_indicators', [])
-                                if indicators:
+                                st.image(imagens[similar_idx], use_column_width=True)
+                                st.caption(f"{nomes[similar_idx]}")
+                                st.metric("Similaridade", f"{similaridade:.2%}")
+                                
+                                if relationship != 'technical_only':
+                                    relationship_emoji = {
+                                        'identical': '🔄',
+                                        'mirror': '🪞',
+                                        'crop': '✂️',
+                                        'edited': '✏️',
+                                        'different': '❌'
+                                    }
+                                    st.info(f"{relationship_emoji.get(relationship, '🔍')} {relationship.upper()}")
+                                    
+                                    if explanation:
+                                        with st.expander("💡 Análise IA"):
+                                            st.write(explanation)
+                                
+                                if similaridade >= limiar_similaridade:
+                                    st.success("✅ DUPLICATA")
+                                
+                                relatorio_duplicatas.append({
+                                    "Original": nomes[img_orig_idx],
+                                    "Duplicata": nomes[similar_idx],
+                                    "Similaridade": f"{similaridade:.2%}",
+                                    "Tipo": relationship
+                                })
+                    
+                    # Relatório
+                    if relatorio_duplicatas:
+                        st.markdown("### 📊 Relatório de Duplicatas")
+                        df = pd.DataFrame(relatorio_duplicatas)
+                        st.dataframe(df, use_container_width=True)
+                        
+                        csv = df.to_csv(index=False).encode('utf-8')
+                        st.download_button(
+                            "📥 Baixar CSV",
+                            csv,
+                            f"duplicatas_{time.strftime('%Y%m%d_%H%M%S')}.csv",
+                            "text/csv"
+                        )
+                else:
+                    st.info("Nenhuma duplicata encontrada com o limiar atual.")
+                    
+            except Exception as e:
+                st.error(f"Erro na análise de duplicidade: {e}")
+        
+        # ===== MANIPULAÇÃO =====
+        if modo_analise in ["Manipulação por IA", "Análise Completa"]:
+            st.markdown("---")
+            st.markdown("## 🤖 Análise de Manipulação")
+            
+            try:
+                analyzer = TextureAnalyzer(
+                    P=8, 
+                    R=1, 
+                    block_size=tamanho_bloco, 
+                    threshold=threshold_lbp
+                )
+                
+                resultados_manipulacao = []
+                
+                progress_bar = st.progress(0)
+                status_text = st.empty()
+                
+                for i, img in enumerate(imagens):
+                    progress = (i + 1) / len(imagens)
+                    progress_bar.progress(progress)
+                    status_text.text(f"Analisando textura {i+1}/{len(imagens)}: {nomes[i]}")
+                    
+                    # Análise técnica
+                    report_tecnico = analyzer.analyze_image(img)
+                    
+                    # Análise com IA
+                    ai_result = None
+                    if usar_ia_manipulacao and ai_analyzer.enabled:
+                        ai_result = ai_analyzer.analyze_manipulation(img)
+                    
+                    # Combinar resultados
+                    if ai_result and ai_result.get('enabled'):
+                        # Híbrido: 40% técnico, 60% IA
+                        tech_score = report_tecnico['score']
+                        ai_score = 100 - ai_result.get('confidence', 50) if ai_result.get('verdict') == 'MANIPULADA' else ai_result.get('confidence', 50)
+                        
+                        combined_score = int((tech_score * 0.4) + (ai_score * 0.6))
+                        
+                        resultados_manipulacao.append({
+                            "indice": i,
+                            "nome": nomes[i],
+                            "score": combined_score,
+                            "score_tecnico": tech_score,
+                            "score_ia": ai_score,
+                            "ai_verdict": ai_result.get('verdict'),
+                            "ai_explanation": ai_result.get('explanation'),
+                            "ai_indicators": ai_result.get('indicators', []),
+                            "visual_report": report_tecnico.get("visual_report"),
+                            "heatmap": report_tecnico.get("heatmap"),
+                            "modo": "Híbrido"
+                        })
+                    else:
+                        # Apenas técnico
+                        resultados_manipulacao.append({
+                            "indice": i,
+                            "nome": nomes[i],
+                            "score": report_tecnico['score'],
+                            "score_tecnico": report_tecnico['score'],
+                            "categoria": report_tecnico['category'],
+                            "descricao": report_tecnico['description'],
+                            "visual_report": report_tecnico.get("visual_report"),
+                            "heatmap": report_tecnico.get("heatmap"),
+                            "modo": "Técnico"
+                        })
+                
+                progress_bar.empty()
+                status_text.empty()
+                
+                # Exibir resultados
+                manipuladas = sum(1 for r in resultados_manipulacao if r['score'] <= 45)
+                suspeitas = sum(1 for r in resultados_manipulacao if 45 < r['score'] <= 70)
+                naturais = sum(1 for r in resultados_manipulacao if r['score'] > 70)
+                
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.metric("🔴 Manipuladas", manipuladas)
+                with col2:
+                    st.metric("🟡 Suspeitas", suspeitas)
+                with col3:
+                    st.metric("🟢 Naturais", naturais)
+                
+                # Detalhes
+                for res in resultados_manipulacao:
+                    st.write("---")
+                    st.subheader(f"{res['nome']}")
+                    
+                    col1, col2 = st.columns(2)
+                    
+                    with col1:
+                        if res["visual_report"] is not None:
+                            st.image(res["visual_report"], caption="Análise Visual", use_column_width=True)
+                        
+                        score = res['score']
+                        if score <= 45:
+                            st.error(f"🔴 MANIPULADA ({score}%)")
+                        elif score <= 70:
+                            st.warning(f"🟡 SUSPEITA ({score}%)")
+                        else:
+                            st.success(f"🟢 NATURAL ({score}%)")
+                        
+                        st.caption(f"Modo: {res.get('modo', 'Técnico')}")
+                        
+                        if 'score_tecnico' in res and 'score_ia' in res:
+                            st.write(f"**Score Técnico:** {res['score_tecnico']}")
+                            st.write(f"**Score IA:** {res['score_ia']}")
+                    
+                    with col2:
+                        if res["heatmap"] is not None:
+                            st.image(res["heatmap"], caption="Mapa de Calor", use_column_width=True)
+                        
+                        if 'ai_explanation' in res:
+                            with st.expander("💡 Análise da IA"):
+                                st.write(res['ai_explanation'])
+                                
+                                if res.get('ai_indicators'):
                                     st.write("**Indicadores:**")
-                                    for ind in indicators:
+                                    for ind in res['ai_indicators']:
                                         st.write(f"- {ind}")
-    
-    # Exportação
-    st.markdown("---")
-    with st.expander("📥 Exportar Resultados"):
-        export_data = []
-        for r in results:
-            scores = r.get('all_scores', {})
-            export_data.append({
-                'Arquivo': r['filename'],
-                'Veredito': r['verdict'],
-                'Confiança': r['confidence'],
-                'Modo Análise': r.get('analysis_mode', 'N/A'),
-                'Razão': r.get('reason', 'N/A'),
-                'Cena': r.get('scene_type', 'N/A'),
-                'Score Textura': scores.get('texture', 'N/A'),
-                'Score Bordas': scores.get('edge', 'N/A'),
-                'Score Ruído': scores.get('noise', 'N/A'),
-                'Score Iluminação': scores.get('lighting', 'N/A'),
-                'Confiança Técnica': r.get('technical_confidence', 'N/A'),
-                'Confiança IA': r.get('ai_confidence', 'N/A')
-            })
-        
-        df = pd.DataFrame(export_data)
-        st.dataframe(df, use_container_width=True)
-        
-        csv = df.to_csv(index=False).encode('utf-8')
-        st.download_button(
-            "📥 Baixar CSV",
-            csv,
-            "mirrorglass_v3_resultados.csv",
-            "text/csv",
-            use_container_width=True
-        )
+                
+                # Relatório
+                st.markdown("### 📊 Relatório de Manipulação")
+                relatorio_data = []
+                for r in resultados_manipulacao:
+                    relatorio_data.append({
+                        "Arquivo": r['nome'],
+                        "Score Final": r['score'],
+                        "Modo": r.get('modo', 'Técnico'),
+                        "Veredito": "Manipulada" if r['score'] <= 45 else "Suspeita" if r['score'] <= 70 else "Natural"
+                    })
+                
+                df = pd.DataFrame(relatorio_data)
+                st.dataframe(df, use_container_width=True)
+                
+                csv = df.to_csv(index=False).encode('utf-8')
+                st.download_button(
+                    "📥 Baixar CSV",
+                    csv,
+                    f"manipulacao_{time.strftime('%Y%m%d_%H%M%S')}.csv",
+                    "text/csv"
+                )
+                
+            except Exception as e:
+                st.error(f"Erro na análise de manipulação: {e}")
 
 else:
-    st.markdown("---")
-    st.info("👆 Faça upload de imagens e clique em **Analisar Todas** para começar")
+    st.info("👆 Faça upload de imagens para começar a análise")
     
     with st.expander("📖 Guia Rápido"):
         st.markdown("""
-        ### Como usar o MirrorGlass V3:
+        ### Como Usar:
         
-        **1. Configure a API OpenAI** (opcional mas recomendado):
-        - Obtenha uma chave em [platform.openai.com](https://platform.openai.com/api-keys)
-        - Cole na sidebar
-        - Ative "Análise com IA"
+        1. **Escolha o modo de análise:**
+           - **Duplicidade**: Detecta imagens idênticas, espelhadas, recortadas
+           - **Manipulação**: Detecta edições por IA, texturas artificiais
+           - **Completa**: Ambas análises
         
-        **2. Faça upload das imagens**
+        2. **Faça upload das imagens**
         
-        **3. Clique em "Analisar Todas"**
+        3. **Clique em "Iniciar Análise"**
         
-        **4. Veja os resultados:**
-        - 🔴 **MANIPULADA**: Detectada manipulação/IA
-        - 🟢 **NATURAL**: Provavelmente foto real
+        ### Modos de Operação:
         
-        ### O que o V3 detecta:
+        - **Híbrido (com IA)**: Combina análise técnica + GPT-4 Vision
+          - Máxima precisão (85-95%)
+          - Detecta IA generativa
+          - Explica achados
         
-        ✅ Imagens geradas por IA (Midjourney, DALL-E, etc)
-        ✅ Fotos editadas digitalmente
-        ✅ Deepfakes e manipulações faciais
-        ✅ Artefatos de compressão anormais
-        ✅ Inconsistências de iluminação
-        ✅ Reflexos impossíveis
-        ✅ Texturas artificiais
-        
-        ### Modos de operação:
-        
-        - **Híbrido** (Técnica + IA): Máxima precisão
-        - **Técnica apenas**: Funciona sem API key
+        - **Técnico (sem IA)**: Apenas algoritmos matemáticos
+          - Gratuito
+          - Boa precisão (60-70%)
+          - Rápido
         """)
 
+# Rodapé
 st.markdown("---")
-st.caption("MirrorGlass V3 | AI Enhanced Detection | Janeiro 2026")
+st.markdown("**MirrorGlass V3** | AI Enhanced Detection | Janeiro 2026")
