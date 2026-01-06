@@ -350,6 +350,91 @@ class TextureAnalyzer:
         self.block_size = block_size
         self.threshold = threshold
     
+    def detect_ai_artifacts(self, image):
+        """Detecta artefatos específicos de IA generativa"""
+        if isinstance(image, Image.Image):
+            image = np.array(image)
+        
+        if len(image.shape) > 2:
+            img_gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
+        else:
+            img_gray = image.copy()
+        
+        scores = []
+        
+        # 1. Análise de Frequência (IA tem padrões específicos)
+        f_transform = np.fft.fft2(img_gray)
+        f_shift = np.fft.fftshift(f_transform)
+        magnitude_spectrum = np.abs(f_shift)
+        
+        # IA generativa tem padrões muito uniformes nas altas frequências
+        h, w = magnitude_spectrum.shape
+        center_h, center_w = h // 2, w // 2
+        
+        # Analisar anel de alta frequência
+        high_freq_ring = magnitude_spectrum[center_h-10:center_h+10, center_w-10:center_w+10]
+        uniformity = np.std(high_freq_ring) / (np.mean(high_freq_ring) + 1e-10)
+        
+        # IA tem baixa variação (muito uniforme)
+        if uniformity < 0.15:
+            scores.append(0.9)  # Muito suspeito
+        elif uniformity < 0.25:
+            scores.append(0.7)
+        elif uniformity < 0.35:
+            scores.append(0.5)
+        else:
+            scores.append(0.2)
+        
+        # 2. Textura excessivamente suave (típico de IA)
+        laplacian_var = cv2.Laplacian(img_gray, cv2.CV_64F).var()
+        if laplacian_var < 50:  # Muito suave
+            scores.append(0.8)
+        elif laplacian_var < 100:
+            scores.append(0.6)
+        else:
+            scores.append(0.3)
+        
+        # 3. Padrões repetitivos (IA tende a repetir)
+        blocks = []
+        for i in range(0, img_gray.shape[0] - 32, 32):
+            for j in range(0, img_gray.shape[1] - 32, 32):
+                block = img_gray[i:i+32, j:j+32]
+                blocks.append(block.flatten())
+        
+        if len(blocks) > 10:
+            # Calcular similaridade entre blocos
+            similarities = []
+            for i in range(min(10, len(blocks))):
+                for j in range(i+1, min(10, len(blocks))):
+                    corr = np.corrcoef(blocks[i], blocks[j])[0, 1]
+                    similarities.append(abs(corr))
+            
+            avg_sim = np.mean(similarities)
+            if avg_sim > 0.7:  # Blocos muito similares
+                scores.append(0.85)
+            elif avg_sim > 0.5:
+                scores.append(0.65)
+            else:
+                scores.append(0.3)
+        
+        # 4. Gradiente artificial (bordas muito perfeitas)
+        sobelx = cv2.Sobel(img_gray, cv2.CV_64F, 1, 0, ksize=3)
+        sobely = cv2.Sobel(img_gray, cv2.CV_64F, 0, 1, ksize=3)
+        gradient_mag = np.sqrt(sobelx**2 + sobely**2)
+        
+        # IA tem gradientes muito "limpos"
+        gradient_std = np.std(gradient_mag)
+        if gradient_std < 10:
+            scores.append(0.85)
+        elif gradient_std < 20:
+            scores.append(0.65)
+        else:
+            scores.append(0.35)
+        
+        # Score final (0-1, onde 1 = muito provável IA)
+        ai_score = np.mean(scores)
+        return ai_score
+    
     def analyze_texture_variance(self, image):
         if isinstance(image, Image.Image):
             image = np.array(image)
@@ -359,6 +444,7 @@ class TextureAnalyzer:
         else:
             img_gray = image.copy()
         
+        # Análise LBP tradicional
         lbp = local_binary_pattern(img_gray, self.P, self.R, method="uniform")
         
         h, w = img_gray.shape
@@ -381,12 +467,20 @@ class TextureAnalyzer:
         suspicious_mask = norm_map < self.threshold
         naturalness_score = int(np.mean(norm_map) * 100)
         
+        # Análise específica de IA
+        ai_artifact_score = self.detect_ai_artifacts(image)
+        
+        # Combinar scores (se IA score alto, reduzir naturalness)
+        if ai_artifact_score > 0.6:
+            naturalness_score = int(naturalness_score * (1 - ai_artifact_score * 0.5))
+        
         heatmap = cv2.applyColorMap((norm_map * 255).astype(np.uint8), cv2.COLORMAP_JET)
         
         return {
             "naturalness_map": norm_map,
             "suspicious_mask": suspicious_mask,
             "naturalness_score": naturalness_score,
+            "ai_artifact_score": ai_artifact_score,
             "heatmap": heatmap
         }
     
@@ -410,10 +504,12 @@ class TextureAnalyzer:
             visual_report, heatmap = self.generate_visual_report(image, analysis_results)
             
             score = analysis_results["naturalness_score"]
+            ai_artifact_score = analysis_results.get("ai_artifact_score", 0)
             
-            if score <= 45:
+            # Classificação ajustada
+            if score <= 55:  # Era 45
                 category = "Alta chance de manipulação"
-            elif score <= 70:
+            elif score <= 75:  # Era 70
                 category = "Textura suspeita"
             else:
                 category = "Textura natural"
@@ -421,6 +517,7 @@ class TextureAnalyzer:
             return {
                 "score": score,
                 "category": category,
+                "ai_artifact_score": ai_artifact_score,
                 "visual_report": visual_report,
                 "heatmap": heatmap
             }
@@ -428,6 +525,7 @@ class TextureAnalyzer:
             return {
                 "score": 0,
                 "category": "Erro",
+                "ai_artifact_score": 0,
                 "visual_report": None,
                 "heatmap": None
             }
@@ -456,6 +554,8 @@ with st.sidebar:
         ["Duplicidade", "Manipulação por IA", "Análise Completa"],
         help="Escolha o tipo de análise"
     )
+    
+    mostrar_debug = st.checkbox("Modo DEBUG", value=False, help="Mostra scores técnicos detalhados")
     
     if modo_analise in ["Duplicidade", "Análise Completa"]:
         st.subheader("Detecção de Duplicidade")
@@ -536,7 +636,8 @@ if uploaded_files:
                         # Análise técnica completa
                         sim_tecnica, tipo_espelho = detectar_espelhamento(img1_cv, img2_cv)
                         
-                        st.write(f"DEBUG: {nomes[i]} vs {nomes[j]} = {sim_tecnica:.3f}")
+                        if mostrar_debug:
+                            st.write(f"🔍 DEBUG: {nomes[i]} vs {nomes[j]} = {sim_tecnica:.3f}")
                         
                         # IA
                         ai_result = None
@@ -618,6 +719,10 @@ if uploaded_files:
             try:
                 analyzer = TextureAnalyzer(block_size=tamanho_bloco, threshold=threshold_lbp)
                 
+                # Estatísticas
+                stats_metodo = {"🤖 IA": 0, "🔧 Técnica": 0, "🔬 Híbrido": 0, "⚠️ Artefatos IA": 0}
+                stats_veredito = {"MANIPULADA": 0, "SUSPEITA": 0, "NATURAL": 0}
+                
                 for i, img in enumerate(imagens):
                     st.write("---")
                     st.subheader(nomes[i])
@@ -628,31 +733,117 @@ if uploaded_files:
                     if usar_ia_manipulacao and ai_analyzer.enabled:
                         ai_result = ai_analyzer.analyze_manipulation(img)
                     
+                    # DETERMINAR MÉTODO DE DETECÇÃO E SCORE FINAL
+                    metodo_deteccao = []
+                    score_tecnico = report['score']
+                    ai_artifact_score = report.get('ai_artifact_score', 0)
+                    
+                    if ai_result and ai_result.get('enabled') and ai_result.get('verdict') != 'ERRO':
+                        # Análise híbrida
+                        ai_verdict = ai_result.get('verdict')
+                        ai_confidence = ai_result.get('confidence', 0)
+                        
+                        # Lógica de combinação inteligente
+                        if ai_verdict == 'MANIPULADA':
+                            # IA detectou manipulação - dar muito peso
+                            if ai_confidence > 70:
+                                # IA muito confiante - priorizar
+                                score_final = int((100 - ai_confidence) * 0.7 + score_tecnico * 0.3)
+                                metodo_deteccao.append("🤖 IA")
+                                metodo_deteccao.append("🔧 Técnica")
+                            else:
+                                # IA moderadamente confiante
+                                score_final = int((100 - ai_confidence) * 0.5 + score_tecnico * 0.5)
+                                metodo_deteccao.append("🤖 IA")
+                                metodo_deteccao.append("🔧 Técnica")
+                        else:
+                            # IA disse NATURAL
+                            if score_tecnico < 55:
+                                # Conflito: técnica diz manipulada, IA diz natural
+                                score_final = int((score_tecnico * 0.4) + (ai_confidence * 0.6))
+                                metodo_deteccao.append("🔧 Técnica")
+                                metodo_deteccao.append("🤖 IA (conflito)")
+                            else:
+                                # Ambos dizem natural
+                                score_final = int((score_tecnico * 0.6) + (ai_confidence * 0.4))
+                                metodo_deteccao.append("🔬 Híbrido")
+                    else:
+                        # Apenas técnico
+                        score_final = score_tecnico
+                        metodo_deteccao.append("🔧 Técnica")
+                        
+                        # Adicionar boost por artefatos de IA
+                        if ai_artifact_score > 0.7:
+                            metodo_deteccao.append("⚠️ Artefatos IA")
+                    
                     col1, col2 = st.columns(2)
                     
                     with col1:
                         if report["visual_report"] is not None:
-                            st.image(report["visual_report"])
+                            st.image(report["visual_report"], use_column_width=True)
                         
-                        score = report['score']
-                        if score <= 45:
-                            st.error(f"🔴 MANIPULADA ({score}%)")
-                        elif score <= 70:
-                            st.warning(f"🟡 SUSPEITA ({score}%)")
+                        # VEREDITO COM BADGES
+                        if score_final <= 55:
+                            st.error(f"🔴 MANIPULADA ({score_final}%)")
+                        elif score_final <= 75:
+                            st.warning(f"🟡 SUSPEITA ({score_final}%)")
                         else:
-                            st.success(f"🟢 NATURAL ({score}%)")
+                            st.success(f"🟢 NATURAL ({score_final}%)")
+                        
+                        # BADGES DE MÉTODO (destaque visual)
+                        badges_html = " ".join([f'<span style="background-color: #1f77b4; color: white; padding: 4px 8px; border-radius: 4px; margin: 2px; display: inline-block;">{badge}</span>' for badge in metodo_deteccao])
+                        st.markdown(f"**Detectado por:**<br>{badges_html}", unsafe_allow_html=True)
+                        
+                        # Coletar estatísticas
+                        for metodo in metodo_deteccao:
+                            if metodo in stats_metodo:
+                                stats_metodo[metodo] += 1
+                        
+                        if score_final <= 55:
+                            stats_veredito["MANIPULADA"] += 1
+                        elif score_final <= 75:
+                            stats_veredito["SUSPEITA"] += 1
+                        else:
+                            stats_veredito["NATURAL"] += 1
+                        
+                        # Mostrar scores individuais
+                        with st.expander("📊 Scores Detalhados"):
+                            st.write(f"**Score Técnico:** {score_tecnico}%")
+                            st.write(f"**Artefatos IA:** {int(ai_artifact_score * 100)}%")
+                            if ai_result and ai_result.get('enabled'):
+                                st.write(f"**IA Veredito:** {ai_result.get('verdict')}")
+                                st.write(f"**IA Confiança:** {ai_result.get('confidence')}%")
+                            st.write(f"**Score Final:** {score_final}%")
                     
                     with col2:
                         if report["heatmap"] is not None:
-                            st.image(report["heatmap"])
+                            st.image(report["heatmap"], caption="Mapa de Calor", use_column_width=True)
                         
                         if ai_result and ai_result.get('enabled'):
-                            with st.expander("💡 Análise IA"):
+                            with st.expander("💡 Análise IA (OpenAI)"):
                                 st.write(ai_result.get('explanation', ''))
                                 if ai_result.get('indicators'):
                                     st.write("**Indicadores:**")
                                     for ind in ai_result['indicators']:
                                         st.write(f"- {ind}")
+                
+                # RESUMO DE ESTATÍSTICAS
+                st.markdown("---")
+                st.markdown("### 📊 Resumo da Análise")
+                
+                col1, col2, col3 = st.columns(3)
+                
+                with col1:
+                    st.metric("🔴 Manipuladas", stats_veredito["MANIPULADA"])
+                with col2:
+                    st.metric("🟡 Suspeitas", stats_veredito["SUSPEITA"])
+                with col3:
+                    st.metric("🟢 Naturais", stats_veredito["NATURAL"])
+                
+                st.markdown("**Métodos de Detecção Utilizados:**")
+                for metodo, count in stats_metodo.items():
+                    if count > 0:
+                        st.write(f"- {metodo}: {count} detecção(ões)")
                 
             except Exception as e:
                 st.error(f"Erro: {e}")
