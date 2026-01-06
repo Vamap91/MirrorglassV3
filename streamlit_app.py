@@ -544,7 +544,8 @@ def calcular_similaridade_sift(img1_cv, img2_cv):
         img1_gray = cv2.cvtColor(img1_cv, cv2.COLOR_BGR2GRAY)
         img2_gray = cv2.cvtColor(img2_cv, cv2.COLOR_BGR2GRAY)
         
-        sift = cv2.SIFT_create()
+        # Aumentar número de features detectadas
+        sift = cv2.SIFT_create(nfeatures=0, nOctaveLayers=5, contrastThreshold=0.03, edgeThreshold=8)
         
         kp1, des1 = sift.detectAndCompute(img1_gray, None)
         kp2, des2 = sift.detectAndCompute(img2_gray, None)
@@ -554,28 +555,52 @@ def calcular_similaridade_sift(img1_cv, img2_cv):
             
         FLANN_INDEX_KDTREE = 1
         index_params = dict(algorithm=FLANN_INDEX_KDTREE, trees=5)
-        search_params = dict(checks=50)
+        search_params = dict(checks=100)
         flann = cv2.FlannBasedMatcher(index_params, search_params)
         
         matches = flann.knnMatch(des1, des2, k=2)
         
+        # Ratio test mais permissivo para recortes
         good_matches = []
-        for m, n in matches:
-            if m.distance < 0.7 * n.distance:
-                good_matches.append(m)
+        for match_pair in matches:
+            if len(match_pair) == 2:
+                m, n = match_pair
+                if m.distance < 0.75 * n.distance:
+                    good_matches.append(m)
         
-        max_matches = min(len(kp1), len(kp2))
-        if max_matches == 0:
+        if len(good_matches) < 10:
             return 0
+        
+        # Calcular similaridade baseada em bons matches
+        # Para recortes, usar uma métrica mais generosa
+        total_possible = max(len(kp1), len(kp2))
+        match_ratio = len(good_matches) / total_possible
+        
+        # Boost para casos com muitos matches absolutos (recortes)
+        if len(good_matches) > 50:
+            match_ratio = match_ratio * 1.5
+        elif len(good_matches) > 30:
+            match_ratio = match_ratio * 1.3
+        
+        similarity = min(1.0, match_ratio * 3.0)
+        
+        # Tentar homografia para confirmar recortes/transformações
+        if len(good_matches) >= 10:
+            src_pts = np.float32([kp1[m.queryIdx].pt for m in good_matches]).reshape(-1, 1, 2)
+            dst_pts = np.float32([kp2[m.trainIdx].pt for m in good_matches]).reshape(-1, 1, 2)
             
-        similarity = len(good_matches) / max_matches
+            try:
+                M, mask = cv2.findHomography(src_pts, dst_pts, cv2.RANSAC, 5.0)
+                if M is not None:
+                    matches_mask = mask.ravel().tolist()
+                    inliers = sum(matches_mask)
+                    # Se temos muitos inliers, é muito provável que seja recorte
+                    if inliers > 20:
+                        similarity = max(similarity, 0.7 + (inliers / len(good_matches)) * 0.3)
+            except:
+                pass
         
-        if similarity < 0.05:
-            adjusted_similarity = 0
-        else:
-            adjusted_similarity = min(1.0, similarity * 2)
-        
-        return adjusted_similarity
+        return similarity
         
     except Exception as e:
         return 0
@@ -642,9 +667,9 @@ def detectar_duplicatas(imagens, nomes, limiar=0.5, metodo="SIFT + SSIM", ai_ana
                 )
                 similaridade_tecnica = (sim_ssim * 0.3) + (sim_sift * 0.7)
             
-            # Análise com IA (se disponível)
+            # Análise com IA (se disponível e similaridade > 25%)
             ai_result = None
-            if ai_analyzer and ai_analyzer.enabled and similaridade_tecnica > (limiar * 0.7):
+            if ai_analyzer and ai_analyzer.enabled and similaridade_tecnica > 0.25:
                 ai_result = ai_analyzer.analyze_duplicate(
                     imagens[indices_validos[i]], 
                     imagens[indices_validos[j]]
@@ -728,7 +753,7 @@ with st.sidebar:
             "Limiar de Similaridade (%)", 
             min_value=30, 
             max_value=100, 
-            value=50,
+            value=40,
             help="Imagens com similaridade acima deste valor serão consideradas duplicatas"
         )
         limiar_similaridade = limiar_similaridade / 100
