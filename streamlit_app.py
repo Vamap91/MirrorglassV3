@@ -31,6 +31,213 @@ st.set_page_config(
 )
 
 # ============================================================================
+# METADATA ANALYZER - Primeira camada de triagem
+# ============================================================================
+
+class MetadataAnalyzer:
+    """Analisa metadados EXIF para detectar manipulação antes das outras análises"""
+    
+    # Software que indica manipulação
+    EDITING_SOFTWARE = [
+        "photoshop", "lightroom", "gimp", "paint.net", "affinity",
+        "photodirector", "corel", "capture one", "darktable", "rawtherapee"
+    ]
+    
+    AI_SOFTWARE = [
+        "midjourney", "dall-e", "dalle", "stable diffusion", "stablediffusion",
+        "firefly", "leonardo.ai", "playground", "craiyon", "nightcafe",
+        "artbreeder", "runway", "wombo", "canva"
+    ]
+    
+    def __init__(self):
+        pass
+    
+    def extract_metadata(self, image: Union[Image.Image, str]) -> Dict[str, Any]:
+        """Extrai metadados EXIF da imagem"""
+        try:
+            if isinstance(image, str):
+                img = Image.open(image)
+            else:
+                img = image
+            
+            # Extrair EXIF
+            exif_data = img.getexif()
+            
+            if exif_data is None or len(exif_data) == 0:
+                return {}
+            
+            metadata = {}
+            
+            # Tags EXIF importantes
+            tags = {
+                271: 'Make',           # Fabricante da câmera
+                272: 'Model',          # Modelo da câmera
+                305: 'Software',       # Software usado
+                306: 'DateTime',       # Data/hora
+                36867: 'DateTimeOriginal',  # Data original
+                36868: 'DateTimeDigitized', # Data digitalização
+                37377: 'ShutterSpeed',
+                37378: 'Aperture',
+                34855: 'ISOSpeed',
+                37385: 'Flash',
+                42036: 'LensModel',
+            }
+            
+            for tag_id, tag_name in tags.items():
+                if tag_id in exif_data:
+                    metadata[tag_name] = str(exif_data[tag_id])
+            
+            # Informações adicionais
+            if hasattr(img, 'info'):
+                for key in ['Software', 'software', 'Comment', 'comment']:
+                    if key in img.info:
+                        metadata['Software'] = str(img.info[key])
+                        break
+            
+            return metadata
+            
+        except Exception as e:
+            return {}
+    
+    def analyze_software(self, software: str) -> Tuple[str, float, str]:
+        """
+        Analisa o campo Software
+        Returns: (veredito, confiança, tipo)
+        """
+        if not software:
+            return "DESCONHECIDO", 0, "sem_software"
+        
+        software_lower = software.lower()
+        
+        # Detectar IA generativa
+        for ai_tool in self.AI_SOFTWARE:
+            if ai_tool in software_lower:
+                return "MANIPULADA", 0.98, f"ia_{ai_tool.replace(' ', '_')}"
+        
+        # Detectar software de edição
+        for edit_tool in self.EDITING_SOFTWARE:
+            if edit_tool in software_lower:
+                return "MANIPULADA", 0.90, f"editada_{edit_tool}"
+        
+        # Software de câmera/smartphone (natural)
+        if any(x in software_lower for x in ['camera', 'firmware', 'android', 'ios', 'iphone']):
+            return "NATURAL", 0.70, "camera_software"
+        
+        return "DESCONHECIDO", 0, "software_desconhecido"
+    
+    def analyze_camera_data(self, metadata: Dict[str, Any]) -> Tuple[str, float]:
+        """
+        Analisa presença de dados de câmera
+        Returns: (veredito, confiança)
+        """
+        camera_indicators = 0
+        total_checks = 5
+        
+        # 1. Fabricante da câmera
+        if 'Make' in metadata:
+            camera_indicators += 1
+        
+        # 2. Modelo da câmera
+        if 'Model' in metadata:
+            camera_indicators += 1
+        
+        # 3. Data de captura
+        if 'DateTimeOriginal' in metadata or 'DateTimeDigitized' in metadata:
+            camera_indicators += 1
+        
+        # 4. Configurações de câmera (ISO, Flash, etc)
+        if any(key in metadata for key in ['ISOSpeed', 'Flash', 'ShutterSpeed', 'Aperture']):
+            camera_indicators += 1
+        
+        # 5. Modelo de lente
+        if 'LensModel' in metadata:
+            camera_indicators += 1
+        
+        if camera_indicators == 0:
+            return "SUSPEITA", 0.75  # Sem dados de câmera = muito suspeito
+        elif camera_indicators <= 2:
+            return "SUSPEITA", 0.55
+        elif camera_indicators <= 3:
+            return "INCONCLUSIVO", 0.40
+        else:
+            return "NATURAL", 0.70
+    
+    def analyze(self, image: Union[Image.Image, str]) -> Dict[str, Any]:
+        """
+        Análise completa de metadados
+        Returns: resultado com veredito, confiança, tipo, detalhes
+        """
+        metadata = self.extract_metadata(image)
+        
+        # Se não há metadados
+        if not metadata or len(metadata) == 0:
+            return {
+                'verdict': 'SUSPEITA',
+                'confidence': 75,
+                'detection_type': 'sem_metadados',
+                'method': 'metadata',
+                'is_conclusive': False,
+                'details': 'Imagem sem metadados EXIF (típico de screenshot ou IA)',
+                'metadata': {},
+                'should_continue': True  # Continuar para análise técnica
+            }
+        
+        # Analisar software (prioridade máxima)
+        software = metadata.get('Software', '')
+        software_verdict, software_conf, software_type = self.analyze_software(software)
+        
+        # Se software é conclusivo
+        if software_conf >= 0.85:
+            return {
+                'verdict': software_verdict,
+                'confidence': int(software_conf * 100),
+                'detection_type': software_type,
+                'method': 'metadata',
+                'is_conclusive': True,
+                'details': f'Software detectado: {software}',
+                'metadata': metadata,
+                'should_continue': False  # NÃO precisa continuar!
+            }
+        
+        # Analisar dados de câmera
+        camera_verdict, camera_conf = self.analyze_camera_data(metadata)
+        
+        # Combinar análises
+        if software_verdict != "DESCONHECIDO":
+            # Dar mais peso ao software
+            final_verdict = software_verdict
+            final_conf = int((software_conf * 0.7 + camera_conf * 0.3) * 100)
+        else:
+            final_verdict = camera_verdict
+            final_conf = int(camera_conf * 100)
+        
+        # Decisão se é conclusivo
+        is_conclusive = final_conf >= 85
+        
+        # Detalhes
+        details_parts = []
+        if software:
+            details_parts.append(f"Software: {software}")
+        if 'Make' in metadata and 'Model' in metadata:
+            details_parts.append(f"Câmera: {metadata['Make']} {metadata['Model']}")
+        elif 'Make' in metadata or 'Model' in metadata:
+            details_parts.append(f"Câmera: {metadata.get('Make', metadata.get('Model', ''))}")
+        
+        if not details_parts:
+            details_parts.append("Metadados parciais")
+        
+        return {
+            'verdict': final_verdict,
+            'confidence': final_conf,
+            'detection_type': 'metadata_analysis',
+            'method': 'metadata',
+            'is_conclusive': is_conclusive,
+            'details': ' | '.join(details_parts),
+            'metadata': metadata,
+            'should_continue': not is_conclusive
+        }
+
+# ============================================================================
 # OPENAI INTEGRATION
 # ============================================================================
 
@@ -578,6 +785,12 @@ with st.sidebar:
     if modo_analise in ["Manipulação por IA", "Análise Completa"]:
         st.subheader("Detecção de Manipulação")
         
+        usar_metadados = st.checkbox(
+            "📋 Analisar Metadados (Triagem Rápida)",
+            value=True,
+            help="Analisa metadados EXIF antes das outras análises. Economiza custo e tempo!"
+        )
+        
         tamanho_bloco = st.slider("Tamanho Bloco", 8, 32, 16, 4)
         threshold_lbp = st.slider("Sensibilidade", 0.1, 0.5, 0.35, 0.05)
         
@@ -720,15 +933,77 @@ if uploaded_files:
                 analyzer = TextureAnalyzer(block_size=tamanho_bloco, threshold=threshold_lbp)
                 
                 # Estatísticas
-                stats_metodo = {"🤖 IA": 0, "🔧 Técnica": 0, "🔬 Híbrido": 0, "⚠️ Artefatos IA": 0}
+                stats_metodo = {"🤖 IA": 0, "🔧 Técnica": 0, "🔬 Híbrido": 0, "⚠️ Artefatos IA": 0, "📋 Metadados": 0}
                 stats_veredito = {"MANIPULADA": 0, "SUSPEITA": 0, "NATURAL": 0}
                 
                 for i, img in enumerate(imagens):
                     st.write("---")
                     st.subheader(nomes[i])
                     
+                    # ===== CAMADA 1: ANÁLISE DE METADADOS (SE ATIVADA) =====
+                    metadata_result = None
+                    if usar_metadados:
+                        metadata_analyzer = MetadataAnalyzer()
+                        metadata_result = metadata_analyzer.analyze(img)
+                        
+                        # Se metadados são conclusivos, usar e economizar
+                        if metadata_result['is_conclusive']:
+                        metodo_deteccao = ["📋 Metadados"]
+                        score_final = 100 - metadata_result['confidence'] if metadata_result['verdict'] == 'MANIPULADA' else metadata_result['confidence']
+                        
+                        col1, col2 = st.columns(2)
+                        
+                        with col1:
+                            st.image(img, use_column_width=True)
+                            
+                            # VEREDITO
+                            if metadata_result['verdict'] == 'MANIPULADA':
+                                st.error(f"🔴 MANIPULADA ({metadata_result['confidence']}%)")
+                            elif metadata_result['verdict'] == 'SUSPEITA':
+                                st.warning(f"🟡 SUSPEITA ({metadata_result['confidence']}%)")
+                            else:
+                                st.success(f"🟢 NATURAL ({metadata_result['confidence']}%)")
+                            
+                            # BADGES
+                            badges_html = '<span style="background-color: #28a745; color: white; padding: 4px 8px; border-radius: 4px; margin: 2px; display: inline-block;">📋 Metadados</span>'
+                            st.markdown(f"**Detectado por:**<br>{badges_html}", unsafe_allow_html=True)
+                            
+                            # Economia
+                            st.success("💰 **Análise Econômica:**\n- ✅ Metadados conclusivos\n- ❌ Análise técnica não necessária\n- ❌ Análise IA não necessária\n- 💵 Economia: $0.02")
+                            
+                            with st.expander("📊 Detalhes"):
+                                st.write(f"**Veredito:** {metadata_result['verdict']}")
+                                st.write(f"**Confiança:** {metadata_result['confidence']}%")
+                                st.write(f"**Detalhes:** {metadata_result['details']}")
+                                if metadata_result['metadata']:
+                                    st.write("**Metadados Encontrados:**")
+                                    for key, value in metadata_result['metadata'].items():
+                                        st.write(f"- {key}: {value}")
+                        
+                        with col2:
+                            st.info("### 🎯 Análise Rápida\n\nMetadados EXIF conclusivos detectados!\n\nNão foi necessário processar a imagem com algoritmos pesados ou IA, economizando tempo e custo.")
+                        
+                        # Estatísticas
+                        metodo_deteccao.append("📋 Metadados")
+                        for metodo in metodo_deteccao:
+                            if metodo in stats_metodo:
+                                stats_metodo[metodo] += 1
+                            else:
+                                stats_metodo["🔬 Híbrido"] += 1
+                        
+                        if metadata_result['verdict'] == 'MANIPULADA':
+                            stats_veredito["MANIPULADA"] += 1
+                        elif metadata_result['verdict'] == 'SUSPEITA':
+                            stats_veredito["SUSPEITA"] += 1
+                        else:
+                            stats_veredito["NATURAL"] += 1
+                        
+                        continue  # Pula para próxima imagem
+                    
+                    # ===== CAMADA 2: ANÁLISE TÉCNICA =====
                     report = analyzer.analyze_image(img)
                     
+                    # ===== CAMADA 3: ANÁLISE IA (SE NECESSÁRIO) =====
                     ai_result = None
                     if usar_ia_manipulacao and ai_analyzer.enabled:
                         ai_result = ai_analyzer.analyze_manipulation(img)
@@ -737,6 +1012,10 @@ if uploaded_files:
                     metodo_deteccao = []
                     score_tecnico = report['score']
                     ai_artifact_score = report.get('ai_artifact_score', 0)
+                    
+                    # Considerar metadados se houver informação relevante
+                    if metadata_result and metadata_result['confidence'] > 60:
+                        metodo_deteccao.append("📋 Metadados")
                     
                     if ai_result and ai_result.get('enabled') and ai_result.get('verdict') != 'ERRO':
                         # Análise híbrida
@@ -808,12 +1087,34 @@ if uploaded_files:
                         
                         # Mostrar scores individuais
                         with st.expander("📊 Scores Detalhados"):
+                            # Metadados (se disponível e não-conclusivo)
+                            if metadata_result and not metadata_result['is_conclusive']:
+                                st.write(f"**📋 Metadados:** {metadata_result['verdict']} ({metadata_result['confidence']}%)")
+                                st.caption(f"↳ {metadata_result['details']}")
+                            
                             st.write(f"**Score Técnico:** {score_tecnico}%")
                             st.write(f"**Artefatos IA:** {int(ai_artifact_score * 100)}%")
                             if ai_result and ai_result.get('enabled'):
                                 st.write(f"**IA Veredito:** {ai_result.get('verdict')}")
                                 st.write(f"**IA Confiança:** {ai_result.get('confidence')}%")
                             st.write(f"**Score Final:** {score_final}%")
+                            
+                            # Camadas executadas
+                            st.write("**🔄 Camadas Executadas:**")
+                            if metadata_result:
+                                if metadata_result['is_conclusive']:
+                                    st.write("1. ✅ Metadados (conclusivo)")
+                                else:
+                                    st.write("1. ✅ Metadados (inconclusivo)")
+                            else:
+                                st.write("1. ⚪ Metadados (desativado)")
+                            st.write("2. ✅ Análise Técnica")
+                            if ai_result and ai_result.get('enabled'):
+                                st.write("3. ✅ Análise IA")
+                                st.caption("💵 Custo: ~$0.01-0.02")
+                            else:
+                                st.write("3. ⚪ Análise IA (não usada)")
+                                st.caption("💰 Economia: $0.01-0.02")
                     
                     with col2:
                         if report["heatmap"] is not None:
@@ -831,7 +1132,7 @@ if uploaded_files:
                 st.markdown("---")
                 st.markdown("### 📊 Resumo da Análise")
                 
-                col1, col2, col3 = st.columns(3)
+                col1, col2, col3, col4 = st.columns(4)
                 
                 with col1:
                     st.metric("🔴 Manipuladas", stats_veredito["MANIPULADA"])
@@ -840,10 +1141,35 @@ if uploaded_files:
                 with col3:
                     st.metric("🟢 Naturais", stats_veredito["NATURAL"])
                 
+                # Calcular economia
+                total_imagens = len(imagens)
+                imagens_com_ia = stats_metodo.get("🤖 IA", 0)
+                imagens_metadados = stats_metodo.get("📋 Metadados", 0)
+                custo_por_ia = 0.015  # $0.015 média
+                
+                custo_total_sem_triagem = total_imagens * custo_por_ia
+                custo_real = imagens_com_ia * custo_por_ia
+                economia = custo_total_sem_triagem - custo_real
+                pct_economia = (economia / custo_total_sem_triagem * 100) if custo_total_sem_triagem > 0 else 0
+                
+                with col4:
+                    st.metric("💰 Economia", f"${economia:.3f}", f"{pct_economia:.0f}%")
+                
                 st.markdown("**Métodos de Detecção Utilizados:**")
                 for metodo, count in stats_metodo.items():
                     if count > 0:
                         st.write(f"- {metodo}: {count} detecção(ões)")
+                
+                # Detalhamento de custos
+                with st.expander("💵 Detalhamento de Custos"):
+                    st.write(f"**Total de imagens:** {total_imagens}")
+                    st.write(f"**Resolvidas por metadados:** {imagens_metadados} (grátis)")
+                    st.write(f"**Analisadas com IA:** {imagens_com_ia} (~${imagens_com_ia * custo_por_ia:.3f})")
+                    st.write(f"**Apenas técnica:** {total_imagens - imagens_metadados - imagens_com_ia} (grátis)")
+                    st.write("---")
+                    st.write(f"**Custo sem triagem:** ${custo_total_sem_triagem:.3f}")
+                    st.write(f"**Custo real:** ${custo_real:.3f}")
+                    st.write(f"**💰 Economia total:** ${economia:.3f} ({pct_economia:.0f}%)")
                 
             except Exception as e:
                 st.error(f"Erro: {e}")
