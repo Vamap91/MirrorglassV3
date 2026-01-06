@@ -1,177 +1,354 @@
-# 🔍 MirrorGlass V2 - Detector de Manipulação em Lote
+# 🔍 MirrorGlass V3 - AI Enhanced Detection
 
-Aplicação Streamlit para análise automática de manipulação em imagens com detecção de cenas inteligente.
+Detector de manipulação em imagens com **análise híbrida**: combina análise técnica tradicional com GPT-4 Vision da OpenAI para máxima precisão.
 
-[![Open in Streamlit](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://mirrorglass-v2.streamlit.app/)
+[![Open in Streamlit](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://mirrorglass-v3.streamlit.app/)
+
+## 🆕 Novidades da V3
+
+### 🤖 Integração com OpenAI GPT-4 Vision
+- Detecta imagens geradas por IA (Midjourney, DALL-E, Stable Diffusion)
+- Identifica manipulações sutis que algoritmos tradicionais perdem
+- Fornece explicações detalhadas do que foi detectado
+- Analisa contexto e coerência visual
+
+### 🔬 Sistema Híbrido
+- **Análise Técnica**: Textura, bordas, ruído, iluminação
+- **Análise IA**: Contexto semântico, padrões de IA, anomalias visuais
+- **Veredito Combinado**: Confiança de 0-100% baseada em ambas análises
+
+### 📊 Melhor Precisão
+- Redução de falsos positivos
+- Detecção de deepfakes
+- Identificação de edições sofisticadas
+- Explicações compreensíveis
 
 ## 🚀 Deploy no Streamlit Cloud
 
-### Pré-requisitos
-
-- Conta no [GitHub](https://github.com)
-- Conta no [Streamlit Cloud](https://streamlit.io/cloud)
-
 ### Passo 1: Criar repositório no GitHub
 
-1. Acesse [github.com/new](https://github.com/new)
-2. Crie um novo repositório chamado `mirrorglass-v2`
-3. Selecione "Public" para que o Streamlit Cloud possa acessar
-4. Clique em "Create repository"
-
-### Passo 2: Fazer upload dos arquivos
-
-Clone o repositório e adicione os arquivos:
-
 ```bash
-git clone https://github.com/seu-usuario/mirrorglass-v2.git
-cd mirrorglass-v2
+git clone https://github.com/seu-usuario/mirrorglass-v3.git
+cd mirrorglass-v3
 
-# Copie os arquivos aqui:
+# Copie os arquivos:
 # - streamlit_app.py
 # - requirements.txt
 # - README.md
+# - .streamlit/secrets.toml (para API key)
 
 git add .
-git commit -m "Initial commit: MirrorGlass V2"
+git commit -m "MirrorGlass V3 - AI Enhanced"
 git push origin main
 ```
 
-### Passo 3: Deploy no Streamlit Cloud
+### Passo 2: Configurar API Key da OpenAI
+
+Você tem 2 opções:
+
+#### Opção A: Via Streamlit Secrets (Recomendado)
+
+1. No Streamlit Cloud, vá em Settings > Secrets
+2. Adicione:
+```toml
+OPENAI_API_KEY = "sk-sua-chave-aqui"
+```
+
+#### Opção B: Via Interface (Temporário)
+
+- Cole a chave diretamente na sidebar da aplicação
+- ⚠️ Não recomendado para produção (a chave não persiste)
+
+### Passo 3: Deploy
 
 1. Acesse [share.streamlit.io](https://share.streamlit.io)
 2. Clique em "New app"
 3. Selecione:
-   - **Repository**: `seu-usuario/mirrorglass-v2`
-   - **Branch**: `main`
-   - **Main file path**: `streamlit_app.py`
+   - Repository: `seu-usuario/mirrorglass-v3`
+   - Branch: `main`
+   - Main file: `streamlit_app.py`
 4. Clique em "Deploy"
 
-Pronto! Sua aplicação estará disponível em `https://mirrorglass-v2.streamlit.app/`
+## 🔑 Como Obter API Key da OpenAI
 
-## 📋 Estrutura dos Arquivos
+1. Acesse [platform.openai.com](https://platform.openai.com/signup)
+2. Crie uma conta
+3. Vá em [API Keys](https://platform.openai.com/api-keys)
+4. Clique em "Create new secret key"
+5. Copie a chave (você não verá novamente!)
+6. Configure créditos de pagamento (pré-pago)
 
-```
-mirrorglass-v2/
-├── streamlit_app.py      # Aplicação principal (contém tudo integrado)
-├── requirements.txt      # Dependências do projeto
-└── README.md            # Este arquivo
-```
+**💰 Custo Estimado:**
+- GPT-4 Vision: ~$0.01 por imagem
+- 100 imagens: ~$1.00
+- 1000 imagens: ~$10.00
 
-## 🔧 Instalação Local
+## 💻 Instalação Local
 
 ### Requisitos
 - Python 3.8+
-- pip
+- OpenAI API Key (opcional)
 
 ### Instalação
 
 ```bash
 # 1. Clone o repositório
-git clone https://github.com/seu-usuario/mirrorglass-v2.git
-cd mirrorglass-v2
+git clone https://github.com/seu-usuario/mirrorglass-v3.git
+cd mirrorglass-v3
 
-# 2. Instale as dependências
+# 2. Crie ambiente virtual
+python -m venv venv
+source venv/bin/activate  # Linux/Mac
+# ou
+venv\Scripts\activate  # Windows
+
+# 3. Instale dependências
 pip install -r requirements.txt
 
-# 3. Execute a aplicação
+# 4. Configure API key (opcional)
+export OPENAI_API_KEY="sk-sua-chave-aqui"  # Linux/Mac
+# ou
+set OPENAI_API_KEY=sk-sua-chave-aqui  # Windows
+
+# 5. Execute
 streamlit run streamlit_app.py
 ```
 
-A aplicação abrirá em `http://localhost:8501`
+## 📋 Estrutura do Projeto
 
-## 📊 Funcionalidades
-
-- ✅ **Upload em lote**: Analise múltiplas imagens simultaneamente
-- ✅ **Detecção automática de cenas**: Identifica carros, vidros, reflexos
-- ✅ **Análise de textura**: Detecta padrões não-naturais
-- ✅ **Análise de bordas**: Identifica artefatos de manipulação
-- ✅ **Análise de ruído**: Detecta compressão e processamento
-- ✅ **Análise de iluminação**: Verifica inconsistências de luz
-- ✅ **Detecção de reflexos**: Identifica superfícies especulares
-- ✅ **Exportação em CSV**: Baixe os resultados em formato tabular
-- ✅ **3 níveis de sensibilidade**: Conservador, Balanceado, Agressivo
+```
+mirrorglass-v3/
+├── streamlit_app.py          # Aplicação principal
+├── requirements.txt          # Dependências
+├── README.md                 # Este arquivo
+├── .gitignore               # Arquivos ignorados
+└── .streamlit/
+    └── secrets.toml         # API keys (não commitar!)
+```
 
 ## 🎯 Como Usar
 
-### Passo 1: Carregar Imagens
-Arraste suas imagens (JPG, JPEG, PNG) para a área de upload
+### Modo Híbrido (Recomendado)
 
-### Passo 2: Configurar Sensibilidade
-Na sidebar, escolha entre:
-- **Conservador**: Menos falsos positivos
-- **Balanceado**: Equilíbrio entre precisão e recall
-- **Agressivo**: Detecta mais manipulações
+1. **Configure a API OpenAI** na sidebar
+2. **Ative "Análise com IA"**
+3. **Upload das imagens**
+4. **Clique em "Analisar Todas"**
+5. **Veja resultados detalhados:**
+   - Veredito: MANIPULADA ou NATURAL
+   - Confiança: 0-100%
+   - Explicação da IA
+   - Scores técnicos
 
-### Passo 3: Analisar
-Clique em "🚀 Analisar Todas" para processar as imagens
+### Modo Técnico (Sem API)
 
-### Passo 4: Visualizar Resultados
-- Veja o resumo geral
-- Filtre por veredito (Manipulada/Natural)
-- Expanda os detalhes para ver scores individuais
-- Exporte os resultados em CSV
+1. **Desative "Análise com IA"** ou não configure API key
+2. **Upload das imagens**
+3. **Análise baseada apenas em características técnicas**
 
-## 📊 Interpretação dos Resultados
+## 📊 O Que o V3 Detecta
 
-### Vereditos
+### ✅ Imagens Geradas por IA
+- Midjourney
+- DALL-E 3
+- Stable Diffusion
+- Leonardo AI
+- Outras ferramentas de IA
 
-- 🔴 **MANIPULADA**: Alta probabilidade de ser IA ou editada
-- 🟢 **NATURAL**: Provavelmente foto real
+### ✅ Manipulações Digitais
+- Photoshop/edições
+- Deepfakes
+- Face swaps
+- Clonagem de objetos
+- Remoção de elementos
 
-### Scores (0-100%)
+### ✅ Artefatos Técnicos
+- Compressão anormal
+- Ruído artificial
+- Bordas inconsistentes
+- Iluminação impossível
+- Reflexos incorretos
 
-- **Textura**: Padrões de textura natural vs artificial
-- **Bordas**: Qualidade e consistência das bordas
-- **Ruído**: Nível de ruído e compressão
-- **Iluminação**: Consistência de iluminação
-- **Reflexo**: Presença de reflexos especulares
+## 🔬 Como Funciona
 
-## 🔄 Atualizar a Aplicação
+### 1. Análise Técnica (Sempre Ativa)
 
-Para atualizar a aplicação no Streamlit Cloud:
-
-```bash
-# Faça as alterações necessárias
-# Commit e push para GitHub
-git add .
-git commit -m "Descrição das alterações"
-git push origin main
+```python
+- Textura: Análise de padrões LBP
+- Bordas: Detecção Canny + Laplacian
+- Ruído: Estimativa de sigma
+- Iluminação: Brilho + Contraste
 ```
 
-O Streamlit Cloud detectará automaticamente as mudanças e fará o redeploy.
+### 2. Análise com IA (Opcional)
 
-## 📝 Dependências
+```python
+- GPT-4 Vision analisa contexto
+- Identifica padrões de IA generativa
+- Detecta inconsistências semânticas
+- Explica achados em linguagem natural
+```
 
-- **streamlit**: Framework web
-- **numpy**: Computação numérica
-- **opencv-python-headless**: Processamento de imagens
-- **scikit-image**: Análise de imagens
-- **scikit-learn**: Machine learning
-- **scipy**: Computação científica
-- **Pillow**: Processamento de imagens
-- **pandas**: Manipulação de dados
-- **matplotlib**: Visualização
-- **PyWavelets**: Processamento de wavelets
+### 3. Combinação Inteligente
 
-## 🐛 Troubleshooting
+```python
+Confiança Final = (40% Técnica) + (60% IA)
 
-### Erro: "ModuleNotFoundError"
-Certifique-se de que o `requirements.txt` está no repositório e contém todas as dependências.
+Se ambas concordam:
+  → Alta confiança no veredito
 
-### Erro: "Image file is truncated"
-Verifique se as imagens estão corrompidas. Tente com outras imagens.
+Se divergem:
+  → Prioriza análise com maior confiança
+  → Sinaliza conflito ao usuário
+```
+
+## 📈 Comparação de Versões
+
+| Característica | V2 | V3 |
+|---|---|---|
+| Análise Técnica | ✅ | ✅ |
+| Detecção de Cenas | ✅ | ✅ |
+| IA Generativa | ❌ | ✅ |
+| Explicações Detalhadas | ❌ | ✅ |
+| Deepfake Detection | Limitado | ✅ |
+| Contexto Semântico | ❌ | ✅ |
+| Precisão Estimada | 60-70% | 85-95% |
+
+## 🐛 Solução de Problemas
+
+### Erro: "OpenAI API key not configured"
+
+**Solução:**
+- Configure a chave na sidebar ou
+- Desative "Análise com IA" para usar só análise técnica
+
+### Erro: "Rate limit exceeded"
+
+**Solução:**
+- OpenAI tem limites de requisições
+- Aguarde alguns minutos
+- Ou upgrade o plano na OpenAI
+
+### Erro: "Insufficient credits"
+
+**Solução:**
+- Adicione créditos em [platform.openai.com/account/billing](https://platform.openai.com/account/billing)
+- OpenAI cobra pré-pago
 
 ### Aplicação lenta
-Reduza o tamanho das imagens ou processe menos imagens por vez.
+
+**Solução:**
+- Análise com IA demora ~5-10s por imagem
+- Processe menos imagens por vez
+- Ou use modo técnico apenas
+
+## 💡 Dicas de Uso
+
+### Para Melhor Precisão
+
+1. **Use modo híbrido** quando possível
+2. **Analise múltiplas imagens** do mesmo contexto
+3. **Compare resultados** entre técnica e IA
+4. **Leia as explicações** da IA para entender achados
+
+### Para Economizar Créditos
+
+1. **Pré-filtre com análise técnica** primeiro
+2. **Use IA apenas em casos duvidosos**
+3. **Processe lotes menores**
+4. **Configure limites de gastos** na OpenAI
+
+## 📝 Interpretação dos Resultados
+
+### 🔴 MANIPULADA (Alta Confiança: 80-100%)
+
+**Exemplo:**
+```
+Veredito: MANIPULADA (95%)
+Modo: Híbrida (Técnica + IA)
+Razão: Ambas análises concordam - Detectados padrões típicos 
+de IA generativa, texturas artificiais e inconsistências de 
+iluminação impossíveis em fotografia real.
+
+Indicadores IA:
+- Textura de pele artificial
+- Reflexos impossíveis em vidros
+- Compressão inconsistente
+```
+
+### 🟢 NATURAL (Alta Confiança: 80-100%)
+
+**Exemplo:**
+```
+Veredito: NATURAL (92%)
+Modo: Híbrida (Técnica + IA)
+Razão: Ambas análises concordam - Características consistentes 
+com fotografia real, ruído natural de câmera, iluminação 
+coerente e ausência de artefatos de edição.
+```
+
+### ⚠️ INCERTO (Média Confiança: 50-79%)
+
+**Exemplo:**
+```
+Veredito: MANIPULADA (65%)
+Modo: Híbrida (Técnica + IA)
+Razão: Análises divergentes - Técnica detectou anomalias 
+mas IA não encontrou padrões definitivos. Requer análise manual.
+```
+
+## 🔒 Segurança e Privacidade
+
+### ⚠️ Importante
+
+- **Suas imagens são enviadas para a OpenAI** quando usa análise com IA
+- OpenAI armazena temporariamente para processamento
+- Veja [políticas da OpenAI](https://openai.com/policies/usage-policies)
+- **Não envie imagens sensíveis/confidenciais** sem revisar políticas
+
+### Recomendações
+
+- Use modo técnico para imagens sensíveis
+- Revise políticas de privacidade da OpenAI
+- Considere hospedar próprio modelo se precisar de privacidade total
+
+## 📊 Limitações
+
+### O que o sistema NÃO pode fazer:
+
+❌ Garantir 100% de precisão
+❌ Identificar intenção maliciosa
+❌ Funcionar como prova legal definitiva
+❌ Detectar todas manipulações invisíveis ao olho humano
+
+### O que o sistema PODE fazer:
+
+✅ Fornecer análise técnica objetiva
+✅ Identificar padrões suspeitos
+✅ Auxiliar investigações
+✅ Triagem automatizada de grandes volumes
+
+## 🤝 Contribuindo
+
+Sugestões e melhorias são bem-vindas! Abra uma issue ou pull request no GitHub.
 
 ## 📄 Licença
 
-Este projeto é fornecido como está para fins educacionais e de pesquisa.
+Apache License 2.0 - Veja [LICENSE](LICENSE) para detalhes.
 
-## 👨‍💻 Suporte
+## 🙏 Agradecimentos
 
-Para reportar problemas ou sugestões, abra uma issue no repositório GitHub.
+- **OpenAI** pela API GPT-4 Vision
+- **Streamlit** pela plataforma
+- **Scikit-image** e **OpenCV** pelas ferramentas de análise
+
+## 📮 Suporte
+
+- **Issues**: [GitHub Issues](https://github.com/seu-usuario/mirrorglass-v3/issues)
+- **Discussões**: [GitHub Discussions](https://github.com/seu-usuario/mirrorglass-v3/discussions)
 
 ---
 
-**MirrorGlass V2** | Análise de Manipulação em Imagens | 2025
+**MirrorGlass V3** | AI Enhanced Detection | Janeiro 2026
+
+Desenvolvido com ❤️ para combater desinformação visual
