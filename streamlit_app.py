@@ -49,8 +49,32 @@ class MetadataAnalyzer:
         "artbreeder", "runway", "wombo", "canva"
     ]
     
+    # Indicadores de IA no NOME do arquivo
+    AI_FILENAME_INDICATORS = [
+        "chatgpt", "gpt", "dalle", "dall-e", "midjourney", "stablediffusion",
+        "stable_diffusion", "ai_generated", "ai-generated", "generated",
+        "firefly", "leonardo", "bing_create", "copilot", "gemini"
+    ]
+    
     def __init__(self):
         pass
+    
+    def analyze_filename(self, filename: str) -> Tuple[str, float, str]:
+        """
+        Analisa o NOME do arquivo para detectar IA
+        Returns: (veredito, confiança, tipo)
+        """
+        if not filename:
+            return "DESCONHECIDO", 0, "sem_nome"
+        
+        filename_lower = filename.lower()
+        
+        # Detectar indicadores de IA no nome
+        for ai_indicator in self.AI_FILENAME_INDICATORS:
+            if ai_indicator in filename_lower:
+                return "MANIPULADA", 0.95, f"filename_{ai_indicator}"
+        
+        return "DESCONHECIDO", 0, "nome_sem_indicadores"
     
     def extract_metadata(self, image: Union[Image.Image, str]) -> Dict[str, Any]:
         """Extrai metadados EXIF da imagem"""
@@ -162,11 +186,27 @@ class MetadataAnalyzer:
         else:
             return "NATURAL", 0.70
     
-    def analyze(self, image: Union[Image.Image, str]) -> Dict[str, Any]:
+    def analyze(self, image: Union[Image.Image, str], filename: str = None) -> Dict[str, Any]:
         """
-        Análise completa de metadados
+        Análise completa de metadados + nome de arquivo
         Returns: resultado com veredito, confiança, tipo, detalhes
         """
+        # PRIORIDADE 1: Analisar nome do arquivo
+        if filename:
+            filename_verdict, filename_conf, filename_type = self.analyze_filename(filename)
+            if filename_conf >= 0.85:
+                return {
+                    'verdict': filename_verdict,
+                    'confidence': int(filename_conf * 100),
+                    'detection_type': filename_type,
+                    'method': 'filename',
+                    'is_conclusive': True,
+                    'details': f'Nome do arquivo indica IA: {filename}',
+                    'metadata': {},
+                    'should_continue': False
+                }
+        
+        # PRIORIDADE 2: Metadados EXIF
         metadata = self.extract_metadata(image)
         
         # Se não há metadados
@@ -677,9 +717,14 @@ class TextureAnalyzer:
         # Análise específica de IA
         ai_artifact_score = self.detect_ai_artifacts(image)
         
-        # Combinar scores (se IA score alto, reduzir naturalness)
-        if ai_artifact_score > 0.6:
-            naturalness_score = int(naturalness_score * (1 - ai_artifact_score * 0.5))
+        # Combinar scores COM MUITO CUIDADO (vidros/reflexos confundem!)
+        # Só penaliza se MUITO alto E score técnico já baixo
+        if ai_artifact_score > 0.80 and naturalness_score < 60:
+            # Penalização SUAVE para evitar falsos positivos
+            naturalness_score = int(naturalness_score * (1 - ai_artifact_score * 0.25))
+        elif ai_artifact_score > 0.90:
+            # Apenas casos MUITO óbvios
+            naturalness_score = int(naturalness_score * (1 - ai_artifact_score * 0.35))
         
         heatmap = cv2.applyColorMap((norm_map * 255).astype(np.uint8), cv2.COLORMAP_JET)
         
@@ -713,10 +758,10 @@ class TextureAnalyzer:
             score = analysis_results["naturalness_score"]
             ai_artifact_score = analysis_results.get("ai_artifact_score", 0)
             
-            # Classificação ajustada
-            if score <= 55:  # Era 45
+            # Classificação MENOS agressiva (muitos falsos positivos)
+            if score <= 40:  # Era 55 - REDUZIDO para evitar falsos positivos
                 category = "Alta chance de manipulação"
-            elif score <= 75:  # Era 70
+            elif score <= 65:  # Era 75 - REDUZIDO
                 category = "Textura suspeita"
             else:
                 category = "Textura natural"
@@ -944,7 +989,7 @@ if uploaded_files:
                     metadata_result = None
                     if usar_metadados:
                         metadata_analyzer = MetadataAnalyzer()
-                        metadata_result = metadata_analyzer.analyze(img)
+                        metadata_result = metadata_analyzer.analyze(img, filename=nomes[i])
                         
                         # Se metadados são conclusivos, usar e economizar
                         if metadata_result['is_conclusive']:
@@ -1060,10 +1105,10 @@ if uploaded_files:
                         if report["visual_report"] is not None:
                             st.image(report["visual_report"], use_column_width=True)
                         
-                        # VEREDITO COM BADGES
-                        if score_final <= 55:
+                        # VEREDITO COM BADGES (thresholds MENOS agressivos)
+                        if score_final <= 45:  # Era 55 - REDUZIDO para evitar falsos positivos
                             st.error(f"🔴 MANIPULADA ({score_final}%)")
-                        elif score_final <= 75:
+                        elif score_final <= 70:  # Era 75
                             st.warning(f"🟡 SUSPEITA ({score_final}%)")
                         else:
                             st.success(f"🟢 NATURAL ({score_final}%)")
@@ -1077,9 +1122,9 @@ if uploaded_files:
                             if metodo in stats_metodo:
                                 stats_metodo[metodo] += 1
                         
-                        if score_final <= 55:
+                        if score_final <= 45:  # Era 55
                             stats_veredito["MANIPULADA"] += 1
-                        elif score_final <= 75:
+                        elif score_final <= 70:  # Era 75
                             stats_veredito["SUSPEITA"] += 1
                         else:
                             stats_veredito["NATURAL"] += 1
