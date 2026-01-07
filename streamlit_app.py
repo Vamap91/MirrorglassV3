@@ -40,26 +40,27 @@ def analisar_contexto_openai(img1, img2, api_key, sift_score):
                     "content": [
                         {
                             "type": "text",
-                            "text": f"""ANÁLISE DE DUPLICATA - Score SIFT: {sift_score:.0%}
+                            "text": f"""DETECÇÃO DE DUPLICATAS - Score SIFT: {sift_score:.0%}
 
-Compare estas imagens e responda APENAS em JSON:
+Compare e responda em JSON:
 
 {{
     "mesmo_veiculo": true/false,
     "mesmo_local": true/false,
     "mesmo_contexto": true/false,
     "mesma_oficina": true/false,
-    "elementos_comuns": ["elemento1", "elemento2"],
+    "elementos_comuns": ["lista completa"],
     "sao_duplicatas": true/false,
     "confianca": 0-100,
-    "motivo": "explicação"
+    "motivo": "explicação detalhada"
 }}
 
-REGRAS:
-- Se mesmo veículo + mesma oficina → duplicatas=true
-- Se contexto 80%+ idêntico → duplicatas=true
-- Se apenas ângulo diferente mas mesma cena → duplicatas=true
-- Liste TODOS elementos comuns"""
+REGRAS CRÍTICAS:
+- Mesmo veículo (modelo, cor, danos) + mesma oficina = DUPLICATAS
+- Apenas ângulo diferente mas mesma cena = DUPLICATAS
+- Contexto 70%+ idêntico = DUPLICATAS
+- Se dúvida: prefira duplicatas=true
+- Liste TODOS elementos visíveis em comum"""
                         },
                         {
                             "type": "image_url",
@@ -72,7 +73,7 @@ REGRAS:
                     ]
                 }
             ],
-            max_tokens=500
+            max_tokens=600
         )
         
         result_text = response.choices[0].message.content
@@ -124,40 +125,87 @@ def calcular_sift(img1, img2):
 def detectar_duplicata(img1, img2, api_key, usar_ia):
     sift_score, good_matches = calcular_sift(img1, img2)
     
-    if sift_score >= 0.40:
+    if good_matches == 0:
         return {
-            'duplicata': True,
+            'duplicata': False,
             'metodo': 'SIFT',
-            'score': sift_score,
-            'matches': good_matches,
-            'motivo': f'Alta similaridade SIFT: {sift_score:.0%} ({good_matches} matches)'
+            'score': 0,
+            'matches': 0,
+            'motivo': 'Zero matches SIFT - imagens completamente diferentes'
         }
     
-    if sift_score >= 0.15 and usar_ia and api_key:
-        ia_result = analisar_contexto_openai(img1, img2, api_key, sift_score)
-        
-        if 'error' not in ia_result:
-            sao_dup = ia_result.get('sao_duplicatas', False)
-            mesmo_veiculo = ia_result.get('mesmo_veiculo', False)
-            mesmo_contexto = ia_result.get('mesmo_contexto', False)
-            confianca = ia_result.get('confianca', 0) / 100.0
-            
-            if sao_dup or (mesmo_veiculo and mesmo_contexto) or confianca >= 0.70:
-                return {
-                    'duplicata': True,
-                    'metodo': 'IA',
-                    'score': max(sift_score, confianca),
-                    'matches': good_matches,
-                    'motivo': ia_result.get('motivo', 'IA confirmou duplicata'),
-                    'ia_detalhes': ia_result
-                }
+    if not usar_ia or not api_key:
+        if sift_score >= 0.30:
+            return {
+                'duplicata': True,
+                'metodo': 'SIFT (sem IA)',
+                'score': sift_score,
+                'matches': good_matches,
+                'motivo': f'SIFT {sift_score:.0%} - Ative IA para melhor precisão'
+            }
+        return {
+            'duplicata': False,
+            'metodo': 'SIFT (sem IA)',
+            'score': sift_score,
+            'matches': good_matches,
+            'motivo': 'Ative IA para análise completa'
+        }
+    
+    ia_result = analisar_contexto_openai(img1, img2, api_key, sift_score)
+    
+    if 'error' in ia_result:
+        return {
+            'duplicata': sift_score >= 0.30,
+            'metodo': 'SIFT (IA erro)',
+            'score': sift_score,
+            'matches': good_matches,
+            'motivo': f'IA falhou: {ia_result["error"]}'
+        }
+    
+    sao_dup = ia_result.get('sao_duplicatas', False)
+    mesmo_veiculo = ia_result.get('mesmo_veiculo', False)
+    mesmo_local = ia_result.get('mesmo_local', False)
+    mesmo_contexto = ia_result.get('mesmo_contexto', False)
+    mesma_oficina = ia_result.get('mesma_oficina', False)
+    confianca = ia_result.get('confianca', 0) / 100.0
+    
+    if sao_dup:
+        return {
+            'duplicata': True,
+            'metodo': 'IA',
+            'score': confianca,
+            'matches': good_matches,
+            'motivo': ia_result.get('motivo', 'IA confirmou: são duplicatas'),
+            'ia_detalhes': ia_result
+        }
+    
+    if mesmo_veiculo and (mesmo_local or mesma_oficina or mesmo_contexto):
+        return {
+            'duplicata': True,
+            'metodo': 'IA',
+            'score': confianca,
+            'matches': good_matches,
+            'motivo': 'Mesmo veículo + mesmo contexto = DUPLICATA',
+            'ia_detalhes': ia_result
+        }
+    
+    if confianca >= 0.70:
+        return {
+            'duplicata': True,
+            'metodo': 'IA',
+            'score': confianca,
+            'matches': good_matches,
+            'motivo': f'IA {confianca:.0%} confiante: duplicata',
+            'ia_detalhes': ia_result
+        }
     
     return {
         'duplicata': False,
-        'metodo': 'OK',
-        'score': sift_score,
+        'metodo': 'IA',
+        'score': confianca,
         'matches': good_matches,
-        'motivo': 'Imagens diferentes'
+        'motivo': ia_result.get('motivo', 'IA confirmou: imagens diferentes'),
+        'ia_detalhes': ia_result
     }
 
 st.title("🔍 Detector de Duplicatas")
@@ -250,12 +298,28 @@ else:
             status = st.empty()
             
             resultados = []
+            todas_comparacoes = []
             
             for idx, img_base in enumerate(st.session_state.base_historica):
                 progress.progress((idx + 1) / len(st.session_state.base_historica))
                 status.text(f"Analisando {idx + 1}/{len(st.session_state.base_historica)}")
                 
                 resultado = detectar_duplicata(nova_img, img_base, api_key, usar_ia)
+                
+                resultado['debug'] = {
+                    'idx': idx,
+                    'nome_base': st.session_state.nomes_historico[idx],
+                    'sift_score': resultado.get('score', 0),
+                    'matches': resultado.get('matches', 0),
+                    'ia_ativa': usar_ia,
+                    'api_key_presente': bool(api_key)
+                }
+                
+                todas_comparacoes.append({
+                    'idx': idx,
+                    'nome': st.session_state.nomes_historico[idx],
+                    'resultado': resultado
+                })
                 
                 if resultado['duplicata']:
                     resultados.append({
@@ -267,6 +331,19 @@ else:
             
             progress.empty()
             status.empty()
+            
+            with st.expander("🔍 Debug: Todas Comparações"):
+                for comp in todas_comparacoes:
+                    res = comp['resultado']
+                    st.write(f"**{comp['nome']}:**")
+                    st.write(f"- Duplicata: {'🚨 SIM' if res['duplicata'] else '✅ NÃO'}")
+                    st.write(f"- Método: {res['metodo']}")
+                    st.write(f"- Score: {res['score']:.0%}")
+                    st.write(f"- Matches SIFT: {res['matches']}")
+                    st.write(f"- Motivo: {res['motivo']}")
+                    if 'ia_detalhes' in res:
+                        st.json(res['ia_detalhes'])
+                    st.write("---")
             
             st.markdown("---")
             st.markdown("## 📊 Resultado")
