@@ -12,7 +12,7 @@ try:
 except ImportError:
     OPENAI_AVAILABLE = False
 
-st.set_page_config(page_title="Detector Anti-Fraude - Base Histórica", page_icon="🔍", layout="wide")
+st.set_page_config(page_title="Detector Genial Multi-Camadas", page_icon="🧠", layout="wide")
 
 if 'base_historica' not in st.session_state:
     st.session_state.base_historica = []
@@ -23,7 +23,7 @@ def image_to_base64(img):
     img.save(buffered, format="PNG")
     return base64.b64encode(buffered.getvalue()).decode()
 
-def analisar_contexto_completo(img1, img2, api_key):
+def analisar_ia_contexto(img1, img2, api_key, razao_acionamento):
     openai.api_key = api_key
     
     img1_b64 = image_to_base64(img1)
@@ -38,29 +38,35 @@ def analisar_contexto_completo(img1, img2, api_key):
                     "content": [
                         {
                             "type": "text",
-                            "text": """ANÁLISE ANTI-FRAUDE: Compare estas 2 imagens e responda APENAS em JSON:
+                            "text": f"""ANÁLISE CRÍTICA DE DUPLICATA/FRAUDE:
 
-{
-    "objeto_principal_1": "descrição",
-    "objeto_principal_2": "descrição",
-    "fundo_1": "descrição detalhada do fundo/contexto",
-    "fundo_2": "descrição detalhada do fundo/contexto",
-    "objetos_ao_redor_1": ["objeto1", "objeto2", "objeto3"],
-    "objetos_ao_redor_2": ["objeto1", "objeto2", "objeto3"],
-    "local_1": "descrição do local (estacionamento, rua, garagem)",
-    "local_2": "descrição do local",
+Razão do acionamento: {razao_acionamento}
+
+Compare estas 2 imagens e responda em JSON:
+
+{{
+    "descricao_img1": "descrição completa",
+    "descricao_img2": "descrição completa",
+    "objeto_principal_1": "ex: Carro branco VW",
+    "objeto_principal_2": "ex: Carro branco VW",
+    "contexto_1": "oficina, jeep ao fundo, parede azul",
+    "contexto_2": "oficina, jeep ao fundo, parede azul",
+    "mesmo_objeto": true/false,
+    "mesmo_contexto": true/false,
     "mesmo_local": true/false,
-    "mesmo_fundo": true/false,
-    "mesmos_objetos_redor": true/false,
-    "contexto_identico": true/false,
-    "possivel_fraude": true/false,
-    "confianca_fraude": 0-100,
-    "motivo_suspeita": "explicação detalhada se suspeito",
-    "elementos_comuns": ["elemento1", "elemento2"],
-    "diferencas": ["diferença1", "diferença2"]
-}
+    "eh_crop_ou_zoom": true/false,
+    "eh_mesma_foto": true/false,
+    "confianca": 0-100,
+    "tipo_duplicata": "EXATA|CROP|EDITADA|DIFERENTES",
+    "elementos_identicos": ["elemento1", "elemento2"],
+    "explicacao": "explicação detalhada"
+}}
 
-ATENÇÃO: Se FUNDO e CONTEXTO são 90%+ idênticos mas objeto mudou → PROVÁVEL FRAUDE"""
+ATENÇÃO ESPECIAL:
+- Se CONTEXTO idêntico mas ângulo diferente → mesma_foto=true, eh_crop_ou_zoom=true
+- Se mesma cena mas uma é CROP/RECORTE da outra → eh_mesma_foto=true
+- Se mesmo carro, mesma oficina, mesmos objetos → mesmo_contexto=true
+- Se elementos de fundo IDÊNTICOS → provável crop/fraude"""
                         },
                         {
                             "type": "image_url",
@@ -73,7 +79,7 @@ ATENÇÃO: Se FUNDO e CONTEXTO são 90%+ idênticos mas objeto mudou → PROVÁV
                     ]
                 }
             ],
-            max_tokens=500
+            max_tokens=600
         )
         
         result_text = response.choices[0].message.content
@@ -82,29 +88,27 @@ ATENÇÃO: Se FUNDO e CONTEXTO são 90%+ idênticos mas objeto mudou → PROVÁV
         
         return {
             'enabled': True,
+            'desc1': result.get('descricao_img1', 'N/A'),
+            'desc2': result.get('descricao_img2', 'N/A'),
             'obj1': result.get('objeto_principal_1', 'N/A'),
             'obj2': result.get('objeto_principal_2', 'N/A'),
-            'fundo1': result.get('fundo_1', 'N/A'),
-            'fundo2': result.get('fundo_2', 'N/A'),
-            'objetos_redor1': result.get('objetos_ao_redor_1', []),
-            'objetos_redor2': result.get('objetos_ao_redor_2', []),
-            'local1': result.get('local_1', 'N/A'),
-            'local2': result.get('local_2', 'N/A'),
+            'ctx1': result.get('contexto_1', 'N/A'),
+            'ctx2': result.get('contexto_2', 'N/A'),
+            'mesmo_objeto': result.get('mesmo_objeto', False),
+            'mesmo_contexto': result.get('mesmo_contexto', False),
             'mesmo_local': result.get('mesmo_local', False),
-            'mesmo_fundo': result.get('mesmo_fundo', False),
-            'mesmos_objetos': result.get('mesmos_objetos_redor', False),
-            'contexto_identico': result.get('contexto_identico', False),
-            'possivel_fraude': result.get('possivel_fraude', False),
-            'confianca_fraude': result.get('confianca_fraude', 0),
-            'motivo': result.get('motivo_suspeita', 'N/A'),
-            'elementos_comuns': result.get('elementos_comuns', []),
-            'diferencas': result.get('diferencas', [])
+            'eh_crop': result.get('eh_crop_ou_zoom', False),
+            'eh_mesma_foto': result.get('eh_mesma_foto', False),
+            'confianca': result.get('confianca', 0),
+            'tipo': result.get('tipo_duplicata', 'N/A'),
+            'elementos': result.get('elementos_identicos', []),
+            'explicacao': result.get('explicacao', 'N/A')
         }
     except Exception as e:
         return {'enabled': False, 'error': str(e)}
 
-def calcular_similaridade_tecnica(img1, img2):
-    size = 256
+def layer1_duplicata_exata(img1, img2):
+    size = 128
     img1_small = np.array(img1.resize((size, size)).convert('RGB'))
     img2_small = np.array(img2.resize((size, size)).convert('RGB'))
     
@@ -122,57 +126,149 @@ def calcular_similaridade_tecnica(img1, img2):
     
     hist_score = cv2.compareHist(hist1, hist2, cv2.HISTCMP_CORREL)
     
-    score_tecnico = (pixel_score * 0.5) + (hist_score * 0.5)
+    score = (pixel_score * 0.6) + (hist_score * 0.4)
     
     return {
-        'score': score_tecnico,
+        'score': score,
         'pixel': pixel_score,
-        'hist': hist_score
+        'hist': hist_score,
+        'conclusivo': score >= 0.90
     }
 
-def detectar_fraude(tec, ia_result, usar_ia):
-    if not usar_ia or not ia_result.get('enabled'):
-        if tec['score'] >= 0.70:
-            return True, tec['score'], "DUPLICATA", "Alta similaridade técnica", "⚠️ TÉCNICA"
-        return False, tec['score'], "OK", "Sem suspeita", "✅ OK"
+def layer2_crop_rotacao(img1, img2):
+    size = 512
+    img1_big = np.array(img1.resize((size, size)).convert('RGB'))
+    img2_big = np.array(img2.resize((size, size)).convert('RGB'))
     
-    score_tec = tec['score']
-    contexto_identico = ia_result.get('contexto_identico', False)
-    mesmo_fundo = ia_result.get('mesmo_fundo', False)
-    mesmo_local = ia_result.get('mesmo_local', False)
-    mesmos_objetos = ia_result.get('mesmos_objetos', False)
-    possivel_fraude = ia_result.get('possivel_fraude', False)
-    confianca_fraude = ia_result.get('confianca_fraude', 0) / 100.0
+    gray1 = cv2.cvtColor(img1_big, cv2.COLOR_RGB2GRAY)
+    gray2 = cv2.cvtColor(img2_big, cv2.COLOR_RGB2GRAY)
     
-    score_contexto = 0
-    if mesmo_local: score_contexto += 0.25
-    if mesmo_fundo: score_contexto += 0.35
-    if mesmos_objetos: score_contexto += 0.25
-    if contexto_identico: score_contexto += 0.15
+    sift = cv2.SIFT_create(nfeatures=500)
     
-    if contexto_identico and confianca_fraude >= 0.80:
-        return True, 0.95, "🚨 FRAUDE CONFIRMADA", ia_result.get('motivo', 'Contexto idêntico'), "🚨 IA-FRAUDE"
+    kp1, des1 = sift.detectAndCompute(gray1, None)
+    kp2, des2 = sift.detectAndCompute(gray2, None)
     
-    if (mesmo_fundo and mesmo_local) and confianca_fraude >= 0.70:
-        score_final = (score_tec * 0.3) + (score_contexto * 0.3) + (confianca_fraude * 0.4)
-        return True, score_final, "🔴 FRAUDE PROVÁVEL", ia_result.get('motivo', 'Mesmo contexto'), "🔴 IA-CONTEXTO"
+    if des1 is None or des2 is None or len(des1) < 10 or len(des2) < 10:
+        return {
+            'matches': 0,
+            'good_matches': 0,
+            'inliers': 0,
+            'score': 0,
+            'conclusivo': False,
+            'suspeito_crop': False
+        }
     
-    if possivel_fraude and score_contexto >= 0.50:
-        score_final = (score_tec * 0.4) + (score_contexto * 0.4) + (confianca_fraude * 0.2)
-        return True, score_final, "🟡 SUSPEITO", ia_result.get('motivo', 'Contexto similar'), "🟡 SUSPEITO"
+    bf = cv2.BFMatcher()
+    matches = bf.knnMatch(des1, des2, k=2)
     
-    if score_tec >= 0.85:
-        return True, score_tec, "DUPLICATA TÉCNICA", "Imagens muito similares", "🔬 HÍBRIDO"
+    good = []
+    for m_pair in matches:
+        if len(m_pair) == 2:
+            m, n = m_pair
+            if m.distance < 0.75 * n.distance:
+                good.append(m)
     
-    return False, score_tec, "✅ OK", "Sem fraude detectada", "✅ OK"
+    num_good = len(good)
+    inliers = 0
+    
+    if num_good >= 10:
+        src_pts = np.float32([kp1[m.queryIdx].pt for m in good]).reshape(-1, 1, 2)
+        dst_pts = np.float32([kp2[m.trainIdx].pt for m in good]).reshape(-1, 1, 2)
+        
+        try:
+            M, mask = cv2.findHomography(src_pts, dst_pts, cv2.RANSAC, 5.0)
+            if M is not None and mask is not None:
+                inliers = int(np.sum(mask))
+        except:
+            pass
+    
+    score_sift = min(1.0, num_good / 100.0)
+    
+    suspeito_crop = (num_good >= 30 and inliers >= 15)
+    conclusivo = (num_good >= 50 and inliers >= 30 and score_sift >= 0.70)
+    
+    return {
+        'matches': len(matches),
+        'good_matches': num_good,
+        'inliers': inliers,
+        'score': score_sift,
+        'conclusivo': conclusivo,
+        'suspeito_crop': suspeito_crop
+    }
 
-st.title("🔍 Detector Anti-Fraude com Base Histórica")
-st.markdown("### Sistema em 2 Etapas: Configure a Base → Teste Novas Imagens")
+def decisao_inteligente(layer1, layer2, ia_result, usar_ia):
+    if layer1['conclusivo']:
+        return {
+            'eh_duplicata': True,
+            'confianca': layer1['score'],
+            'tipo': '🔴 DUPLICATA EXATA',
+            'camada': 'Layer 1 (Técnica)',
+            'motivo': f"Similaridade {layer1['score']:.0%} - imagens idênticas",
+            'usou_ia': False,
+            'badge': '1️⃣ TÉCNICA'
+        }
+    
+    if layer2['conclusivo']:
+        return {
+            'eh_duplicata': True,
+            'confianca': layer2['score'],
+            'tipo': '🟡 DUPLICATA (Crop/Rotação)',
+            'camada': 'Layer 2 (SIFT)',
+            'motivo': f"{layer2['good_matches']} features comuns, {layer2['inliers']} inliers - provável crop",
+            'usou_ia': False,
+            'badge': '2️⃣ SIFT'
+        }
+    
+    if layer2['suspeito_crop'] and usar_ia and ia_result and ia_result.get('enabled'):
+        ia_conf = ia_result.get('confianca', 0) / 100.0
+        eh_mesma = ia_result.get('eh_mesma_foto', False)
+        eh_crop = ia_result.get('eh_crop', False)
+        mesmo_ctx = ia_result.get('mesmo_contexto', False)
+        
+        if eh_mesma or (eh_crop and mesmo_ctx):
+            return {
+                'eh_duplicata': True,
+                'confianca': (layer2['score'] * 0.4) + (ia_conf * 0.6),
+                'tipo': '🚨 CROP/FRAUDE DETECTADA',
+                'camada': 'Layer 3 (IA + SIFT)',
+                'motivo': ia_result.get('explicacao', 'IA confirmou: mesma foto'),
+                'usou_ia': True,
+                'badge': '3️⃣ IA',
+                'ia_detalhes': ia_result
+            }
+    
+    if usar_ia and ia_result and ia_result.get('enabled') and (layer1['score'] > 0.60 or layer2['good_matches'] > 15):
+        ia_conf = ia_result.get('confianca', 0) / 100.0
+        
+        if ia_result.get('eh_mesma_foto') and ia_conf >= 0.70:
+            return {
+                'eh_duplicata': True,
+                'confianca': ia_conf,
+                'tipo': '🟠 MESMA FOTO (IA)',
+                'camada': 'Layer 3 (IA)',
+                'motivo': ia_result.get('explicacao', 'IA confirmou duplicata'),
+                'usou_ia': True,
+                'badge': '3️⃣ IA',
+                'ia_detalhes': ia_result
+            }
+    
+    return {
+        'eh_duplicata': False,
+        'confianca': max(layer1['score'], layer2['score']),
+        'tipo': '✅ NÃO É DUPLICATA',
+        'camada': 'Análise Completa',
+        'motivo': 'Imagens diferentes confirmadas',
+        'usou_ia': usar_ia and ia_result and ia_result.get('enabled', False),
+        'badge': '✅ OK'
+    }
+
+st.title("🧠 Detector Genial Multi-Camadas")
+st.markdown("### Sistema Progressivo: Técnica → SIFT → IA (apenas quando necessário)")
 
 with st.sidebar:
-    st.header("📚 ETAPA 1: Base Histórica")
+    st.header("📚 Base Histórica")
     
-    st.info(f"**Imagens na base:** {len(st.session_state.base_historica)}")
+    st.info(f"**Imagens:** {len(st.session_state.base_historica)}")
     
     api_key = None
     usar_ia = False
@@ -181,25 +277,25 @@ with st.sidebar:
         try:
             api_key = st.secrets.get("OPENAI_API_KEY", None)
             if api_key:
-                st.success("✅ OpenAI Configurada")
-                usar_ia = st.checkbox("🤖 Análise IA", value=True)
+                st.success("✅ OpenAI OK")
+                usar_ia = st.checkbox("🤖 Layer 3: IA", value=True,
+                    help="Ativa apenas se Layers 1-2 inconclusivas")
             else:
-                st.warning("⚠️ Configure OPENAI_API_KEY")
+                st.warning("⚠️ OpenAI: Configure key")
         except:
-            st.warning("⚠️ Configure OPENAI_API_KEY")
+            st.warning("⚠️ OpenAI: Configure key")
     
     st.markdown("---")
     
     uploaded_base = st.file_uploader(
-        "📤 Upload Base Histórica",
+        "📤 Upload Base",
         type=['jpg','png','jpeg'],
         accept_multiple_files=True,
-        help="Fotos antigas de sinistros já aprovados",
-        key="uploader_base"
+        key="base"
     )
     
     if uploaded_base:
-        if st.button("💾 Adicionar à Base", type="primary"):
+        if st.button("💾 Adicionar", type="primary"):
             novos = 0
             for f in uploaded_base:
                 if f.name not in st.session_state.nomes_historico:
@@ -212,72 +308,65 @@ with st.sidebar:
                         st.error(f"Erro: {f.name}")
             
             if novos > 0:
-                st.success(f"✅ {novos} imagem(ns) adicionada(s)")
+                st.success(f"✅ +{novos} img")
                 st.rerun()
-            else:
-                st.warning("⚠️ Todas já estão na base")
     
     if len(st.session_state.base_historica) > 0:
-        if st.button("🗑️ Limpar Base", type="secondary"):
+        if st.button("🗑️ Limpar"):
             st.session_state.base_historica = []
             st.session_state.nomes_historico = []
-            st.success("✅ Base limpa")
             st.rerun()
         
-        with st.expander("📋 Ver Base Histórica"):
+        with st.expander("📋 Ver Base"):
             for idx, nome in enumerate(st.session_state.nomes_historico):
                 st.caption(f"{idx+1}. {nome}")
     
     st.markdown("---")
-    st.markdown("**💡 Como usar:**")
-    st.markdown("""
-    1️⃣ **Configure a Base:**
-       - Upload fotos antigas
-       - Clique em "Adicionar à Base"
+    st.info("""
+    **Sistema em 3 Camadas:**
     
-    2️⃣ **Teste Nova Imagem:**
-       - Use área principal →
-       - Upload 1 nova imagem
-       - Clique em "Analisar"
+    1️⃣ Técnica rápida
+    - Duplicatas exatas
+    
+    2️⃣ SIFT avançado
+    - Crops, rotações
+    
+    3️⃣ IA OpenAI
+    - Apenas se 1-2 inconclusivos
+    - Entende contexto
     """)
 
 st.markdown("---")
 
 if len(st.session_state.base_historica) == 0:
-    st.warning("⚠️ **ETAPA 1:** Configure a base histórica primeiro (sidebar)")
-    st.info("👈 Use a sidebar para fazer upload das imagens antigas")
-    
+    st.warning("⚠️ Configure base primeiro")
 else:
-    st.success(f"✅ Base configurada: {len(st.session_state.base_historica)} imagem(ns)")
+    st.success(f"✅ Base: {len(st.session_state.base_historica)} imgs")
     
     st.markdown("---")
-    st.header("🆕 ETAPA 2: Testar Nova Imagem")
+    st.header("🆕 Testar Nova Imagem")
     
     uploaded_nova = st.file_uploader(
-        "📤 Upload Nova Imagem (teste uma por vez)",
+        "📤 Upload Nova",
         type=['jpg','png','jpeg'],
-        help="Foto do novo sinistro a ser verificado",
-        key="uploader_nova"
+        key="nova"
     )
     
     if uploaded_nova:
         col1, col2 = st.columns([1, 1])
         
         with col1:
-            st.subheader("🆕 Nova Imagem")
+            st.subheader("🆕 Nova")
             nova_img = Image.open(uploaded_nova).convert('RGB')
-            st.image(nova_img, caption=uploaded_nova.name, use_column_width=True)
+            st.image(nova_img, use_column_width=True)
         
         with col2:
-            st.subheader(f"📚 Base: {len(st.session_state.base_historica)} imagens")
-            st.info("Sistema comparará esta nova imagem com TODAS da base histórica")
-            
-            if not usar_ia:
-                st.warning("⚠️ Recomendado: Ativar Análise IA (sidebar)")
+            st.subheader(f"📚 Base: {len(st.session_state.base_historica)}")
+            st.info("Análise progressiva em 3 camadas")
         
         st.markdown("---")
         
-        if st.button("🚀 Analisar Contra Base Histórica", type="primary", use_container_width=True):
+        if st.button("🚀 Analisar Multi-Camadas", type="primary", use_container_width=True):
             progress = st.progress(0)
             status = st.empty()
             
@@ -285,149 +374,125 @@ else:
             
             for idx, img_base in enumerate(st.session_state.base_historica):
                 progress.progress((idx + 1) / len(st.session_state.base_historica))
-                status.text(f"Analisando {idx + 1}/{len(st.session_state.base_historica)}: {st.session_state.nomes_historico[idx]}")
+                status.text(f"Analisando {idx + 1}/{len(st.session_state.base_historica)}")
                 
-                tec = calcular_similaridade_tecnica(nova_img, img_base)
+                l1 = layer1_duplicata_exata(nova_img, img_base)
+                
+                l2 = layer2_crop_rotacao(nova_img, img_base)
                 
                 ia_result = None
-                if usar_ia and api_key:
-                    ia_result = analisar_contexto_completo(nova_img, img_base, api_key)
+                razao_ia = None
                 
-                eh_fraude, score, tipo, motivo, badge = detectar_fraude(tec, ia_result, usar_ia)
+                if not l1['conclusivo'] and l2['suspeito_crop'] and usar_ia and api_key:
+                    razao_ia = f"SIFT detectou {l2['good_matches']} matches e {l2['inliers']} inliers - suspeita de crop/fraude"
+                    ia_result = analisar_ia_contexto(nova_img, img_base, api_key, razao_ia)
+                elif not l1['conclusivo'] and not l2['conclusivo'] and (l1['score'] > 0.60 or l2['good_matches'] > 15) and usar_ia and api_key:
+                    razao_ia = f"Score técnico {l1['score']:.0%} ou {l2['good_matches']} matches - verificação final"
+                    ia_result = analisar_ia_contexto(nova_img, img_base, api_key, razao_ia)
+                
+                decisao = decisao_inteligente(l1, l2, ia_result, usar_ia)
                 
                 resultados.append({
                     'idx': idx,
-                    'nome_base': st.session_state.nomes_historico[idx],
-                    'img_base': img_base,
-                    'eh_fraude': eh_fraude,
-                    'tipo': tipo,
-                    'motivo': motivo,
-                    'score': score,
-                    'badge': badge,
-                    'tec': tec,
-                    'ia': ia_result
+                    'nome': st.session_state.nomes_historico[idx],
+                    'img': img_base,
+                    'layer1': l1,
+                    'layer2': l2,
+                    'ia': ia_result,
+                    'decisao': decisao
                 })
             
             progress.empty()
             status.empty()
             
-            fraudes = [r for r in resultados if r['eh_fraude']]
-            ok = [r for r in resultados if not r['eh_fraude']]
+            duplicatas = [r for r in resultados if r['decisao']['eh_duplicata']]
+            ok = [r for r in resultados if not r['decisao']['eh_duplicata']]
             
             st.markdown("---")
-            st.markdown("## 📊 Resultado da Análise")
+            st.markdown("## 📊 Resultado")
             
-            if fraudes:
-                st.error(f"🚨 {len(fraudes)} MATCH(ES) SUSPEITO(S) NA BASE!")
+            if duplicatas:
+                st.error(f"🚨 {len(duplicatas)} DUPLICATA(S)")
                 
-                for idx, f in enumerate(fraudes):
+                for idx, d in enumerate(duplicatas):
                     st.markdown("---")
-                    st.subheader(f"⚠️ Match Suspeito #{idx+1}")
+                    st.subheader(f"⚠️ Match #{idx+1}")
                     
                     col1, col2, col3 = st.columns([2, 2, 1])
                     
                     with col1:
-                        st.markdown("**🆕 Nova Imagem**")
-                        st.image(nova_img, caption=uploaded_nova.name, use_column_width=True)
+                        st.markdown("**🆕 Nova**")
+                        st.image(nova_img, use_column_width=True)
                     
                     with col2:
-                        st.markdown(f"**📚 Base ({f['idx']+1}/{len(st.session_state.base_historica)})**")
-                        st.image(f['img_base'], caption=f['nome_base'], use_column_width=True)
+                        st.markdown(f"**📚 Base ({d['idx']+1})**")
+                        st.image(d['img'], caption=d['nome'], use_column_width=True)
                     
                     with col3:
-                        st.metric("Score", f"{f['score']:.0%}")
+                        st.metric("Confiança", f"{d['decisao']['confianca']:.0%}")
                         
-                        if "FRAUDE CONFIRMADA" in f['tipo']:
-                            st.error(f['badge'])
-                            st.error(f"**{f['tipo']}**")
-                        elif "PROVÁVEL" in f['tipo']:
-                            st.error(f['badge'])
-                            st.warning(f"**{f['tipo']}**")
-                        elif "SUSPEITO" in f['tipo']:
-                            st.warning(f['badge'])
-                            st.warning(f"**{f['tipo']}**")
+                        if "EXATA" in d['decisao']['tipo']:
+                            st.error(d['decisao']['badge'])
+                            st.error(d['decisao']['tipo'])
+                        elif "CROP" in d['decisao']['tipo']:
+                            st.warning(d['decisao']['badge'])
+                            st.error(d['decisao']['tipo'])
                         else:
-                            st.info(f['badge'])
+                            st.warning(d['decisao']['badge'])
+                            st.warning(d['decisao']['tipo'])
                         
-                        st.caption(f"💡 {f['motivo']}")
+                        st.caption(f"🔍 {d['decisao']['camada']}")
+                        st.caption(f"💡 {d['decisao']['motivo']}")
                     
-                    with st.expander("🔍 Análise Detalhada"):
-                        if f['ia'] and f['ia'].get('enabled'):
-                            ia = f['ia']
-                            
-                            col_a, col_b = st.columns(2)
-                            
-                            with col_a:
-                                st.write("**🆕 Nova Imagem:**")
-                                st.write(f"- Objeto: {ia['obj1']}")
-                                st.write(f"- Fundo: {ia['fundo1']}")
-                                st.write(f"- Local: {ia['local1']}")
-                                
-                                if ia['objetos_redor1']:
-                                    st.write("- Objetos ao redor:")
-                                    for obj in ia['objetos_redor1']:
-                                        st.write(f"  • {obj}")
-                            
-                            with col_b:
-                                st.write("**📚 Base Histórica:**")
-                                st.write(f"- Objeto: {ia['obj2']}")
-                                st.write(f"- Fundo: {ia['fundo2']}")
-                                st.write(f"- Local: {ia['local2']}")
-                                
-                                if ia['objetos_redor2']:
-                                    st.write("- Objetos ao redor:")
-                                    for obj in ia['objetos_redor2']:
-                                        st.write(f"  • {obj}")
-                            
-                            st.markdown("---")
-                            
-                            col_c, col_d = st.columns(2)
-                            
-                            with col_c:
-                                st.write("**🔍 Comparação:**")
-                                st.write(f"Mesmo local: {'🚨 SIM' if ia['mesmo_local'] else '✅ NÃO'}")
-                                st.write(f"Mesmo fundo: {'🚨 SIM' if ia['mesmo_fundo'] else '✅ NÃO'}")
-                                st.write(f"Mesmos objetos: {'🚨 SIM' if ia['mesmos_objetos'] else '✅ NÃO'}")
-                                st.write(f"Contexto idêntico: {'🚨 SIM' if ia['contexto_identico'] else '✅ NÃO'}")
-                            
-                            with col_d:
-                                st.write(f"**⚠️ Confiança Fraude:** {ia['confianca_fraude']}%")
-                                st.write(f"**📊 Score Técnico:** {f['tec']['score']:.0%}")
-                                st.write(f"- Pixel: {f['tec']['pixel']:.0%}")
-                                st.write(f"- Histograma: {f['tec']['hist']:.0%}")
-                            
-                            if ia['elementos_comuns']:
-                                st.markdown("---")
-                                st.write("**🔴 Elementos Comuns:**")
-                                for elem in ia['elementos_comuns']:
-                                    st.write(f"• {elem}")
-                            
-                            if ia['diferencas']:
-                                st.write("**✅ Diferenças:**")
-                                for diff in ia['diferencas']:
-                                    st.write(f"• {diff}")
+                    with st.expander("🔍 Análise Completa"):
+                        tab1, tab2, tab3 = st.tabs(["1️⃣ Técnica", "2️⃣ SIFT", "3️⃣ IA"])
                         
-                        else:
-                            st.write("**📊 Análise Técnica:**")
-                            st.write(f"- Similaridade: {f['tec']['score']:.0%}")
-                            st.write(f"- Pixel: {f['tec']['pixel']:.0%}")
-                            st.write(f"- Histograma: {f['tec']['hist']:.0%}")
-                
-            else:
-                st.success("✅ Nenhum match suspeito encontrado na base")
-                st.info(f"Nova imagem comparada com {len(st.session_state.base_historica)} imagens da base - nenhuma fraude detectada")
+                        with tab1:
+                            st.write("**Layer 1: Duplicata Exata**")
+                            st.write(f"- Score: {d['layer1']['score']:.0%}")
+                            st.write(f"- Pixel: {d['layer1']['pixel']:.0%}")
+                            st.write(f"- Histograma: {d['layer1']['hist']:.0%}")
+                            st.write(f"- Conclusivo: {'✅ SIM' if d['layer1']['conclusivo'] else '❌ NÃO'}")
+                        
+                        with tab2:
+                            st.write("**Layer 2: Crop/Rotação (SIFT)**")
+                            st.write(f"- Total matches: {d['layer2']['matches']}")
+                            st.write(f"- Good matches: {d['layer2']['good_matches']}")
+                            st.write(f"- Inliers: {d['layer2']['inliers']}")
+                            st.write(f"- Score: {d['layer2']['score']:.0%}")
+                            st.write(f"- Suspeito crop: {'🚨 SIM' if d['layer2']['suspeito_crop'] else '❌ NÃO'}")
+                            st.write(f"- Conclusivo: {'✅ SIM' if d['layer2']['conclusivo'] else '❌ NÃO'}")
+                        
+                        with tab3:
+                            if d['decisao'].get('usou_ia') and d['ia'] and d['ia'].get('enabled'):
+                                ia = d['ia']
+                                st.write("**Layer 3: Análise IA**")
+                                st.write(f"- Descrição 1: {ia['desc1']}")
+                                st.write(f"- Descrição 2: {ia['desc2']}")
+                                st.write("---")
+                                st.write(f"- Mesmo objeto: {'✅' if ia['mesmo_objeto'] else '❌'}")
+                                st.write(f"- Mesmo contexto: {'✅' if ia['mesmo_contexto'] else '❌'}")
+                                st.write(f"- É crop: {'🚨' if ia['eh_crop'] else '❌'}")
+                                st.write(f"- Mesma foto: {'🚨' if ia['eh_mesma_foto'] else '❌'}")
+                                st.write(f"- Tipo: {ia['tipo']}")
+                                st.write(f"- Confiança IA: {ia['confianca']}%")
+                                st.write("---")
+                                st.write(f"**Explicação:** {ia['explicacao']}")
+                                
+                                if ia['elementos']:
+                                    st.write("**Elementos idênticos:**")
+                                    for elem in ia['elementos']:
+                                        st.write(f"• {elem}")
+                            else:
+                                st.info("IA não foi acionada (Layers 1-2 foram conclusivas)")
             
-            if ok and len(ok) > 0:
-                with st.expander(f"✅ {len(ok)} comparação(ões) OK (não suspeitas)"):
-                    for o in ok[:5]:
-                        col1, col2 = st.columns([3, 1])
-                        with col1:
-                            st.caption(f"vs {o['nome_base']}")
-                        with col2:
-                            st.caption(f"Score: {o['score']:.0%} ✅")
-                    
-                    if len(ok) > 5:
-                        st.caption(f"... e mais {len(ok)-5} comparações OK")
+            else:
+                st.success("✅ Nenhuma duplicata")
+            
+            if ok:
+                with st.expander(f"✅ {len(ok)} OK"):
+                    for o in ok[:3]:
+                        st.caption(f"{o['nome']}: {o['decisao']['confianca']:.0%}")
 
 st.markdown("---")
-st.caption("Detector Anti-Fraude | Base Histórica + Análise IA | Janeiro 2026")
+st.caption("Detector Genial Multi-Camadas | Janeiro 2026")
