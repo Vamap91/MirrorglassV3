@@ -1,397 +1,499 @@
 import streamlit as st
+import os
 import numpy as np
+import matplotlib.pyplot as plt
 from PIL import Image
-import cv2
-import base64
 import io
+import base64
 import json
+from skimage.metrics import structural_similarity as ssim
+from skimage.transform import resize
+import pandas as pd
+import time
+import cv2
 
-try:
-    import openai
-    OPENAI_AVAILABLE = True
-except ImportError:
-    OPENAI_AVAILABLE = False
+# Configuração da página Streamlit
+st.set_page_config(
+    page_title="Mirror Glass - Detector de Duplicatas",
+    page_icon="🔍",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
 
-st.set_page_config(page_title="Detector Duplicatas", page_icon="🔍", layout="wide")
+# Título e introdução
+st.title("📊 Mirror Glass: Análise de Duplicidade em Imagens")
+st.markdown("""
+Este sistema utiliza técnicas avançadas de visão computacional para:
+- **Detectar imagens duplicadas** ou altamente semelhantes, mesmo com alterações como cortes ou ajustes
 
-if 'base_historica' not in st.session_state:
-    st.session_state.base_historica = []
-    st.session_state.nomes_historico = []
+### Como funciona?
+1. Faça upload das imagens para análise
+2. O sistema analisa duplicidade usando SIFT e SSIM
+3. Resultados são exibidos com detalhamento visual e score de similaridade
+""")
 
-def image_to_base64(img):
-    if isinstance(img, np.ndarray):
-        img = Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
-    buffered = io.BytesIO()
-    img.save(buffered, format="PNG")
-    return base64.b64encode(buffered.getvalue()).decode()
+# Barra lateral com controles
+st.sidebar.header("⚙️ Configurações")
 
-def analisar_contexto_openai(img1, img2, api_key, sift_score):
-    openai.api_key = api_key
-    
-    img1_b64 = image_to_base64(img1)
-    img2_b64 = image_to_base64(img2)
-    
+# Configurações para detecção de duplicidade
+st.sidebar.subheader("Configurações de Duplicidade")
+limiar_similaridade = st.sidebar.slider(
+    "Limiar de Similaridade (%)", 
+    min_value=30, 
+    max_value=100, 
+    value=50, 
+    help="Imagens com similaridade acima deste valor serão consideradas possíveis duplicatas"
+)
+limiar_similaridade = limiar_similaridade / 100  # Converter para decimal
+
+metodo_deteccao = st.sidebar.selectbox(
+    "Método de Detecção",
+    ["SIFT (melhor para recortes)", "SSIM + SIFT", "SSIM"],
+    help="Escolha o método para detectar imagens similares"
+)
+
+# Funções para processamento de imagens - DUPLICIDADE
+def preprocessar_imagem(img, tamanho=(300, 300)):
     try:
-        response = openai.chat.completions.create(
-            model="gpt-4o",
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": f"""DETECÇÃO DE DUPLICATAS - Score SIFT: {sift_score:.0%}
-
-Compare e responda em JSON:
-
-{{
-    "mesmo_veiculo": true/false,
-    "mesmo_local": true/false,
-    "mesmo_contexto": true/false,
-    "mesma_oficina": true/false,
-    "elementos_comuns": ["lista completa"],
-    "sao_duplicatas": true/false,
-    "confianca": 0-100,
-    "motivo": "explicação detalhada"
-}}
-
-REGRAS CRÍTICAS:
-- Mesmo veículo (modelo, cor, danos) + mesma oficina = DUPLICATAS
-- Apenas ângulo diferente mas mesma cena = DUPLICATAS
-- Contexto 70%+ idêntico = DUPLICATAS
-- Se dúvida: prefira duplicatas=true
-- Liste TODOS elementos visíveis em comum"""
-                        },
-                        {
-                            "type": "image_url",
-                            "image_url": {"url": f"data:image/png;base64,{img1_b64}"}
-                        },
-                        {
-                            "type": "image_url",
-                            "image_url": {"url": f"data:image/png;base64,{img2_b64}"}
-                        }
-                    ]
-                }
-            ],
-            max_tokens=600
-        )
-        
-        result_text = response.choices[0].message.content
-        result_text = result_text.replace("```json", "").replace("```", "").strip()
-        return json.loads(result_text)
-        
+        # Redimensionar
+        img_resize = img.resize(tamanho)
+        # Converter para escala de cinza para SSIM
+        img_gray = img_resize.convert('L')
+        # Converter para array numpy
+        img_array = np.array(img_gray)
+        # Normalizar valores para [0, 1]
+        img_array = img_array / 255.0
+        # Converter para CV2 formato (para SIFT)
+        img_cv = np.array(img_resize)
+        img_cv = img_cv[:, :, ::-1].copy()  # RGB para BGR
+        return img_array, img_cv
     except Exception as e:
-        return {'error': str(e)}
+        st.error(f"Erro ao processar imagem: {e}")
+        return None, None
 
-def calcular_sift(img1, img2):
+def calcular_similaridade_ssim(img1, img2):
     try:
-        if isinstance(img1, Image.Image):
-            img1 = np.array(img1)
-        if isinstance(img2, Image.Image):
-            img2 = np.array(img2)
+        # Garantir que as imagens tenham o mesmo tamanho
+        if img1.shape != img2.shape:
+            img2 = resize(img2, img1.shape)
         
-        gray1 = cv2.cvtColor(img1, cv2.COLOR_RGB2GRAY) if len(img1.shape) == 3 else img1
-        gray2 = cv2.cvtColor(img2, cv2.COLOR_RGB2GRAY) if len(img2.shape) == 3 else img2
+        # Calcular SSIM com data_range especificado
+        score = ssim(img1, img2, data_range=1.0)
+        return score
+    except Exception as e:
+        st.error(f"Erro ao calcular similaridade SSIM: {e}")
+        return 0
+
+def calcular_similaridade_sift(img1_cv, img2_cv):
+    try:
+        # Converter para escala de cinza
+        img1_gray = cv2.cvtColor(img1_cv, cv2.COLOR_BGR2GRAY)
+        img2_gray = cv2.cvtColor(img2_cv, cv2.COLOR_BGR2GRAY)
         
+        # Inicializar o detector SIFT
         sift = cv2.SIFT_create()
-        kp1, des1 = sift.detectAndCompute(gray1, None)
-        kp2, des2 = sift.detectAndCompute(gray2, None)
         
+        # Detectar keypoints e descritores
+        kp1, des1 = sift.detectAndCompute(img1_gray, None)
+        kp2, des2 = sift.detectAndCompute(img2_gray, None)
+        
+        # Se não houver descritores suficientes, retorna 0
         if des1 is None or des2 is None or len(des1) < 2 or len(des2) < 2:
-            return 0, 0
-        
+            return 0
+            
+        # Usar o matcher FLANN
         FLANN_INDEX_KDTREE = 1
         index_params = dict(algorithm=FLANN_INDEX_KDTREE, trees=5)
         search_params = dict(checks=50)
         flann = cv2.FlannBasedMatcher(index_params, search_params)
         
+        # Encontrar os 2 melhores matches para cada descritor
         matches = flann.knnMatch(des1, des2, k=2)
         
-        good = []
+        # Filtrar bons matches usando o teste de proporção de Lowe
+        good_matches = []
         for m, n in matches:
             if m.distance < 0.7 * n.distance:
-                good.append(m)
+                good_matches.append(m)
         
+        # Calcular a similaridade baseada no número de bons matches
         max_matches = min(len(kp1), len(kp2))
         if max_matches == 0:
-            return 0, 0
+            return 0
+            
+        similarity = len(good_matches) / max_matches
         
-        score = len(good) / max_matches
-        return score, len(good)
+        # Normalizar para evitar valores muito baixos
+        if similarity < 0.05:
+            adjusted_similarity = 0
+        else:
+            # Expandir valores pequenos para uma escala mais ampla
+            adjusted_similarity = min(1.0, similarity * 2)
+        
+        return adjusted_similarity
         
     except Exception as e:
-        return 0, 0
+        st.error(f"Erro ao calcular similaridade SIFT: {e}")
+        return 0
 
-def detectar_duplicata(img1, img2, api_key, usar_ia):
-    sift_score, good_matches = calcular_sift(img1, img2)
-    
-    if good_matches == 0:
-        return {
-            'duplicata': False,
-            'metodo': 'SIFT',
-            'score': 0,
-            'matches': 0,
-            'motivo': 'Zero matches SIFT - imagens completamente diferentes'
-        }
-    
-    if not usar_ia or not api_key:
-        if sift_score >= 0.30:
-            return {
-                'duplicata': True,
-                'metodo': 'SIFT (sem IA)',
-                'score': sift_score,
-                'matches': good_matches,
-                'motivo': f'SIFT {sift_score:.0%} - Ative IA para melhor precisão'
-            }
-        return {
-            'duplicata': False,
-            'metodo': 'SIFT (sem IA)',
-            'score': sift_score,
-            'matches': good_matches,
-            'motivo': 'Ative IA para análise completa'
-        }
-    
-    ia_result = analisar_contexto_openai(img1, img2, api_key, sift_score)
-    
-    if 'error' in ia_result:
-        return {
-            'duplicata': sift_score >= 0.30,
-            'metodo': 'SIFT (IA erro)',
-            'score': sift_score,
-            'matches': good_matches,
-            'motivo': f'IA falhou: {ia_result["error"]}'
-        }
-    
-    sao_dup = ia_result.get('sao_duplicatas', False)
-    mesmo_veiculo = ia_result.get('mesmo_veiculo', False)
-    mesmo_local = ia_result.get('mesmo_local', False)
-    mesmo_contexto = ia_result.get('mesmo_contexto', False)
-    mesma_oficina = ia_result.get('mesma_oficina', False)
-    confianca = ia_result.get('confianca', 0) / 100.0
-    
-    if sao_dup:
-        return {
-            'duplicata': True,
-            'metodo': 'IA',
-            'score': confianca,
-            'matches': good_matches,
-            'motivo': ia_result.get('motivo', 'IA confirmou: são duplicatas'),
-            'ia_detalhes': ia_result
-        }
-    
-    if mesmo_veiculo and (mesmo_local or mesma_oficina or mesmo_contexto):
-        return {
-            'duplicata': True,
-            'metodo': 'IA',
-            'score': confianca,
-            'matches': good_matches,
-            'motivo': 'Mesmo veículo + mesmo contexto = DUPLICATA',
-            'ia_detalhes': ia_result
-        }
-    
-    if confianca >= 0.70:
-        return {
-            'duplicata': True,
-            'metodo': 'IA',
-            'score': confianca,
-            'matches': good_matches,
-            'motivo': f'IA {confianca:.0%} confiante: duplicata',
-            'ia_detalhes': ia_result
-        }
-    
-    return {
-        'duplicata': False,
-        'metodo': 'IA',
-        'score': confianca,
-        'matches': good_matches,
-        'motivo': ia_result.get('motivo', 'IA confirmou: imagens diferentes'),
-        'ia_detalhes': ia_result
-    }
+def calcular_similaridade_combinada(img1_gray, img2_gray, img1_cv, img2_cv):
+    try:
+        # Calcular similaridade usando ambos os métodos
+        sim_ssim = calcular_similaridade_ssim(img1_gray, img2_gray)
+        sim_sift = calcular_similaridade_sift(img1_cv, img2_cv)
+        
+        # A similaridade combinada é a média ponderada dos dois valores
+        # SIFT tem mais peso para detectar recortes
+        return (sim_ssim * 0.3) + (sim_sift * 0.7)
+    except Exception as e:
+        st.error(f"Erro ao calcular similaridade combinada: {e}")
+        return 0
 
-st.title("🔍 Detector de Duplicatas")
-st.markdown("### SIFT + OpenAI Context Analysis")
+def get_csv_download_link(df, filename, text):
+    csv = df.to_csv(index=False)
+    b64 = base64.b64encode(csv.encode()).decode()
+    href = f'<a href="data:file/csv;base64,{b64}" download="{filename}">{text}</a>'
+    return href
 
-with st.sidebar:
-    st.header("📚 Base")
+def get_image_download_link(img, filename, text):
+    # Converter para PIL Image se for numpy array
+    if isinstance(img, np.ndarray):
+        img_pil = Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
+    else:
+        img_pil = img
+        
+    # Salvar em buffer
+    buf = io.BytesIO()
+    img_pil.save(buf, format='JPEG')
+    buf.seek(0)
     
-    st.info(f"**Imagens:** {len(st.session_state.base_historica)}")
+    # Codificar para base64
+    img_str = base64.b64encode(buf.read()).decode()
+    href = f'<a href="data:image/jpeg;base64,{img_str}" download="{filename}">{text}</a>'
     
-    api_key = None
-    usar_ia = False
+    return href
+
+def visualizar_duplicatas(imagens, nomes, duplicatas, limiar):
+    if not duplicatas:
+        st.info("Nenhuma duplicata encontrada com o limiar de similaridade atual.")
+        return None
     
-    if OPENAI_AVAILABLE:
-        try:
-            api_key = st.secrets.get("OPENAI_API_KEY", None)
-            if api_key:
-                st.success("✅ OpenAI")
-                usar_ia = st.checkbox("🤖 Análise IA", value=True)
-            else:
-                st.error("❌ Configure OPENAI_API_KEY")
-        except:
-            st.error("❌ Configure OPENAI_API_KEY")
+    # Criar DataFrame para relatório
+    relatorio_dados = []
     
-    st.markdown("---")
-    
-    uploaded_base = st.file_uploader(
-        "📤 Upload Base",
-        type=['jpg','png','jpeg'],
-        accept_multiple_files=True,
-        key="base"
-    )
-    
-    if uploaded_base:
-        if st.button("💾 Adicionar"):
-            novos = 0
-            for f in uploaded_base:
-                if f.name not in st.session_state.nomes_historico:
-                    try:
-                        img = Image.open(f).convert('RGB')
-                        st.session_state.base_historica.append(img)
-                        st.session_state.nomes_historico.append(f.name)
-                        novos += 1
-                    except:
-                        pass
+    # Para cada grupo de duplicatas
+    for idx, (img_orig_idx, similares) in enumerate(duplicatas.items()):
+        st.write("---")
+        st.subheader(f"Grupo de Duplicatas #{idx+1}")
+        
+        # Layout para imagem original e suas duplicatas
+        cols = st.columns(min(len(similares) + 1, 4))  # Limita a 4 colunas por linha
+        
+        # Mostrar imagem original
+        with cols[0]:
+            st.image(imagens[img_orig_idx], caption=f"Original: {nomes[img_orig_idx]}", width=200)
+        
+        # Mostrar duplicatas
+        for i, (similar_idx, similaridade) in enumerate(similares):
+            col_index = (i + 1) % len(cols)
             
-            if novos > 0:
-                st.success(f"✅ +{novos}")
-                st.rerun()
+            # Se precisar de uma nova linha
+            if col_index == 0 and i > 0:
+                st.write("")  # Linha em branco
+                cols = st.columns(min(len(similares) - i + 1, 4))
+            
+            with cols[col_index]:
+                st.image(imagens[similar_idx], width=200)
+                caption = f"{nomes[similar_idx]}\nSimilaridade: {similaridade:.2f}"
+                st.caption(caption)
+                
+                # Destacar em verde se acima do limiar
+                if similaridade >= limiar:
+                    st.success("DUPLICATA DETECTADA")
+                
+                # Adicionar ao relatório
+                relatorio_dados.append({
+                    "Arquivo Original": nomes[img_orig_idx],
+                    "Arquivo Duplicado": nomes[similar_idx],
+                    "Similaridade (%)": round(similaridade * 100, 2)
+                })
     
-    if len(st.session_state.base_historica) > 0:
-        if st.button("🗑️ Limpar"):
-            st.session_state.base_historica = []
-            st.session_state.nomes_historico = []
-            st.rerun()
+    # Criar DataFrame do relatório
+    if relatorio_dados:
+        df_relatorio = pd.DataFrame(relatorio_dados)
+        return df_relatorio
+    return None
 
-st.markdown("---")
+# Função principal para detectar duplicatas
+def detectar_duplicatas(imagens, nomes, limiar=0.5, metodo="SIFT (melhor para recortes)"):
+    # Mostrar progresso
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+    
+    # Processar imagens
+    status_text.text("Extraindo características das imagens...")
+    arrays_processados_gray = []  # Para SSIM
+    arrays_processados_cv = []    # Para SIFT
+    indices_validos = []
+    
+    for i, img in enumerate(imagens):
+        # Atualizar barra de progresso
+        progress = (i + 1) / len(imagens)
+        progress_bar.progress(progress)
+        status_text.text(f"Processando imagem {i+1} de {len(imagens)}: {nomes[i]}")
+        
+        # Preprocessar imagem
+        img_array_gray, img_array_cv = preprocessar_imagem(img)
+        if img_array_gray is not None:
+            arrays_processados_gray.append(img_array_gray)
+            arrays_processados_cv.append(img_array_cv)
+            indices_validos.append(i)
+    
+    if not arrays_processados_gray:
+        status_text.error("Nenhuma imagem válida para processamento.")
+        progress_bar.empty()
+        return None
+    
+    # Calcular similaridades
+    status_text.text("Comparando imagens e buscando duplicatas...")
+    duplicatas = {}  # {índice_original: [(índice_similar, similaridade), ...]}
+    
+    total_comparacoes = len(arrays_processados_gray) * (len(arrays_processados_gray) - 1) // 2
+    comparacao_atual = 0
+    
+    for i in range(len(arrays_processados_gray)):
+        similares = []
+        for j in range(len(arrays_processados_gray)):
+            # Não comparar uma imagem com ela mesma
+            if i != j:
+                comparacao_atual += 1
+                
+                # Atualizar progresso de maneira mais segura
+                if total_comparacoes > 0:
+                    # Certificar que o progresso sempre está entre 0 e 1
+                    progress = min(max(comparacao_atual / total_comparacoes, 0.0), 1.0)
+                    progress_bar.progress(progress)
+                
+                # Calcular similaridade com base no método selecionado
+                if metodo == "SSIM":
+                    similaridade = calcular_similaridade_ssim(
+                        arrays_processados_gray[i], 
+                        arrays_processados_gray[j]
+                    )
+                elif metodo == "SIFT (melhor para recortes)":
+                    similaridade = calcular_similaridade_sift(
+                        arrays_processados_cv[i], 
+                        arrays_processados_cv[j]
+                    )
+                else:  # SSIM + SIFT
+                    similaridade = calcular_similaridade_combinada(
+                        arrays_processados_gray[i], 
+                        arrays_processados_gray[j],
+                        arrays_processados_cv[i], 
+                        arrays_processados_cv[j]
+                    )
+                
+                # Se acima do limiar, adicionar como duplicata
+                if similaridade >= limiar:
+                    similares.append((indices_validos[j], similaridade))
+        
+        # Se encontrou duplicatas, adicionar à lista
+        if similares:
+            duplicatas[indices_validos[i]] = similares
+    
+    progress_bar.empty()
+    status_text.text("Processamento concluído!")
+    
+    return duplicatas
 
-if len(st.session_state.base_historica) == 0:
-    st.warning("⚠️ Configure base")
+def convert_numpy_to_list(obj):
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+    elif isinstance(obj, np.integer):
+        return int(obj)
+    elif isinstance(obj, np.floating):
+        return float(obj)
+    elif isinstance(obj, dict):
+        return {k: convert_numpy_to_list(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [convert_numpy_to_list(item) for item in obj]
+    else:
+        return obj
+
+# Função para gerar JSON resumido
+def gerar_json_resumido(dados, tipo_analise):
+    if tipo_analise == "Duplicidade":
+        if dados:
+            resumo = {
+                "timestamp": time.strftime('%Y-%m-%d %H:%M:%S'),
+                "tipo_analise": "Duplicidade",
+                "metodo_usado": "SSIM + SIFT",
+                "total_grupos_duplicatas": len(dados),
+                "total_duplicatas_encontradas": sum(len(similares) for similares in dados.values()),
+                "resumo_grupos": []
+            }
+            
+            for img_orig_idx, similares in dados.items():
+                grupo_resumo = {
+                    "imagem_original_indice": img_orig_idx,
+                    "quantidade_duplicatas": len(similares),
+                    "maior_similaridade": max([sim for _, sim in similares]) if similares else 0,
+                    "menor_similaridade": min([sim for _, sim in similares]) if similares else 0
+                }
+                resumo["resumo_grupos"].append(grupo_resumo)
+            
+            return resumo
+        else:
+            return {
+                "timestamp": time.strftime('%Y-%m-%d %H:%M:%S'),
+                "tipo_analise": "Duplicidade",
+                "total_grupos_duplicatas": 0,
+                "total_duplicatas_encontradas": 0,
+                "resultado": "Nenhuma duplicata encontrada"
+            }
+
+# Interface principal
+st.markdown("### 🔹 Passo 1: Carregar Imagens")
+uploaded_files = st.file_uploader(
+    "Faça upload das imagens para análise", 
+    accept_multiple_files=True,
+    type=['jpg', 'jpeg', 'png']
+)
+
+if uploaded_files:
+    st.write(f"✅ {len(uploaded_files)} imagens carregadas")
+    
+    # Criar botão para iniciar processamento
+    if st.button("🚀 Iniciar Análise de Duplicidade", key="iniciar_analise"):
+        # Carregar imagens
+        imagens = []
+        nomes = []
+        
+        for arquivo in uploaded_files:
+            try:
+                img = Image.open(arquivo).convert('RGB')
+                imagens.append(img)
+                nomes.append(arquivo.name)
+            except Exception as e:
+                st.error(f"Erro ao abrir a imagem {arquivo.name}: {e}")
+        
+        # Análise de duplicidade
+        try:
+            st.markdown("## 🔍 Análise de Duplicidade")
+            duplicatas = detectar_duplicatas(imagens, nomes, limiar_similaridade, metodo_deteccao)
+            
+            # Visualizar resultados de duplicidade
+            if duplicatas:
+                # Estatísticas
+                total_duplicatas = sum(len(similares) for similares in duplicatas.values())
+                st.metric("Total de possíveis duplicatas encontradas", total_duplicatas)
+                
+                # Visualizar duplicatas
+                df_relatorio = visualizar_duplicatas(imagens, nomes, duplicatas, limiar_similaridade)
+                
+                # Gerar relatório
+                if df_relatorio is not None:
+                    st.markdown("### 🔹 Relatório de Duplicatas")
+                    st.dataframe(df_relatorio)
+                    
+                    # Opção para download do relatório
+                    nome_arquivo = f"relatorio_duplicatas_{time.strftime('%Y%m%d_%H%M%S')}.csv"
+                    st.markdown(get_csv_download_link(df_relatorio, nome_arquivo, 
+                                                 "📥 Baixar Relatório CSV"), unsafe_allow_html=True)
+                
+                # JSON Resumido
+                with st.expander("📄 Ver JSON Resumido - Duplicidade"):
+                    json_resumido = gerar_json_resumido(duplicatas, "Duplicidade")
+                    json_str = json.dumps(json_resumido, indent=2, ensure_ascii=False)
+                    st.code(json_str, language='json')
+                    
+                    st.download_button(
+                        label="📥 Baixar JSON Resumido",
+                        data=json_str,
+                        file_name=f"resumo_duplicatas_{time.strftime('%Y%m%d_%H%M%S')}.json",
+                        mime="application/json"
+                    )
+            else:
+                st.warning("Nenhuma duplicata encontrada com o limiar atual. Tente reduzir o limiar de similaridade.")
+                
+                # JSON vazio para nenhuma duplicata
+                with st.expander("📄 Ver JSON Resumido - Duplicidade"):
+                    json_resumido = gerar_json_resumido(None, "Duplicidade")
+                    json_str = json.dumps(json_resumido, indent=2, ensure_ascii=False)
+                    st.code(json_str, language='json')
+                    
+        except Exception as e:
+            st.error(f"Erro durante a detecção de duplicatas: {str(e)}")
+
 else:
-    st.success(f"✅ Base: {len(st.session_state.base_historica)}")
+    # Mostrar exemplo quando não há imagens carregadas
+    st.info("Faça upload de imagens para começar a análise de duplicidade.")
     
-    st.markdown("---")
-    st.header("🆕 Testar Nova")
-    
-    uploaded_nova = st.file_uploader(
-        "📤 Upload Nova",
-        type=['jpg','png','jpeg'],
-        key="nova"
-    )
-    
-    if uploaded_nova:
-        col1, col2 = st.columns([1, 1])
+    # Adicionar imagens de exemplo
+    if st.button("🔍 Ver exemplos de detecção", key="ver_exemplos"):
+        st.write("### Exemplo de Detecção de Duplicidade")
+        
+        col1, col2 = st.columns(2)
         
         with col1:
-            st.subheader("🆕 Nova")
-            nova_img = Image.open(uploaded_nova).convert('RGB')
-            st.image(nova_img, use_column_width=True)
-        
+            st.image("https://via.placeholder.com/400x300?text=Original", caption="Imagem Original")
+            
         with col2:
-            st.subheader(f"📚 Base: {len(st.session_state.base_historica)}")
-            if usar_ia:
-                st.info("🤖 IA ativa para análise de contexto")
+            st.image("https://via.placeholder.com/400x300?text=Duplicata+Recortada", caption="Duplicata (Recortada)")
+            st.write("Similaridade: 0.78")
+            st.success("DUPLICATA DETECTADA")
         
-        st.markdown("---")
-        
-        if st.button("🔍 Detectar Duplicatas", type="primary", use_container_width=True):
-            progress = st.progress(0)
-            status = st.empty()
+        # Exemplo de JSON Resumido
+        with st.expander("📄 Exemplo de JSON Resumido"):
+            exemplo_json = {
+                "timestamp": "2025-06-06 14:30:00",
+                "tipo_analise": "Duplicidade",
+                "metodo_usado": "SSIM + SIFT",
+                "total_grupos_duplicatas": 1,
+                "total_duplicatas_encontradas": 1,
+                "resumo_grupos": [
+                    {
+                        "imagem_original_indice": 0,
+                        "quantidade_duplicatas": 1,
+                        "maior_similaridade": 0.85,
+                        "menor_similaridade": 0.85
+                    }
+                ]
+            }
             
-            resultados = []
-            todas_comparacoes = []
-            
-            for idx, img_base in enumerate(st.session_state.base_historica):
-                progress.progress((idx + 1) / len(st.session_state.base_historica))
-                status.text(f"Analisando {idx + 1}/{len(st.session_state.base_historica)}")
-                
-                resultado = detectar_duplicata(nova_img, img_base, api_key, usar_ia)
-                
-                resultado['debug'] = {
-                    'idx': idx,
-                    'nome_base': st.session_state.nomes_historico[idx],
-                    'sift_score': resultado.get('score', 0),
-                    'matches': resultado.get('matches', 0),
-                    'ia_ativa': usar_ia,
-                    'api_key_presente': bool(api_key)
-                }
-                
-                todas_comparacoes.append({
-                    'idx': idx,
-                    'nome': st.session_state.nomes_historico[idx],
-                    'resultado': resultado
-                })
-                
-                if resultado['duplicata']:
-                    resultados.append({
-                        'idx': idx,
-                        'nome': st.session_state.nomes_historico[idx],
-                        'img': img_base,
-                        'resultado': resultado
-                    })
-            
-            progress.empty()
-            status.empty()
-            
-            with st.expander("🔍 Debug: Todas Comparações"):
-                for comp in todas_comparacoes:
-                    res = comp['resultado']
-                    st.write(f"**{comp['nome']}:**")
-                    st.write(f"- Duplicata: {'🚨 SIM' if res['duplicata'] else '✅ NÃO'}")
-                    st.write(f"- Método: {res['metodo']}")
-                    st.write(f"- Score: {res['score']:.0%}")
-                    st.write(f"- Matches SIFT: {res['matches']}")
-                    st.write(f"- Motivo: {res['motivo']}")
-                    if 'ia_detalhes' in res:
-                        st.json(res['ia_detalhes'])
-                    st.write("---")
-            
-            st.markdown("---")
-            st.markdown("## 📊 Resultado")
-            
-            if resultados:
-                st.error(f"🚨 {len(resultados)} DUPLICATA(S)")
-                
-                for r in resultados:
-                    st.markdown("---")
-                    st.subheader(f"🚨 Duplicata: {r['nome']}")
-                    
-                    col1, col2, col3 = st.columns([2, 2, 1])
-                    
-                    with col1:
-                        st.markdown("**🆕 Nova**")
-                        st.image(nova_img, use_column_width=True)
-                    
-                    with col2:
-                        st.markdown(f"**📚 Base**")
-                        st.image(r['img'], caption=r['nome'], use_column_width=True)
-                    
-                    with col3:
-                        res = r['resultado']
-                        st.metric("Score", f"{res['score']:.0%}")
-                        st.metric("Matches", res['matches'])
-                        
-                        if res['metodo'] == 'IA':
-                            st.error("🤖 IA")
-                        else:
-                            st.error("🔬 SIFT")
-                        
-                        st.caption(res['motivo'])
-                    
-                    if 'ia_detalhes' in res:
-                        with st.expander("🔍 Análise IA"):
-                            ia = res['ia_detalhes']
-                            st.write(f"**Mesmo veículo:** {'✅' if ia.get('mesmo_veiculo') else '❌'}")
-                            st.write(f"**Mesmo local:** {'✅' if ia.get('mesmo_local') else '❌'}")
-                            st.write(f"**Mesmo contexto:** {'✅' if ia.get('mesmo_contexto') else '❌'}")
-                            st.write(f"**Confiança:** {ia.get('confianca')}%")
-                            
-                            if ia.get('elementos_comuns'):
-                                st.write("**Elementos comuns:**")
-                                for elem in ia['elementos_comuns']:
-                                    st.write(f"• {elem}")
-            
-            else:
-                st.success("✅ Nenhuma duplicata")
+            json_str = json.dumps(exemplo_json, indent=2, ensure_ascii=False)
+            st.code(json_str, language='json')
 
+# Rodapé
 st.markdown("---")
-st.caption("Detector Duplicatas | SIFT + OpenAI | Janeiro 2026")
+st.markdown("### Como interpretar os resultados")
+
+# Explicação sobre duplicidade
+st.markdown("""
+#### 🔍 Análise de Duplicidade
+
+**O que é detectado:**
+- Imagens que são cópias exatas ou muito similares
+- Imagens recortadas ou com pequenas alterações
+- Imagens com diferentes resoluções mas mesmo conteúdo
+
+**Métodos disponíveis:**
+- **SIFT**: Melhor para detectar recortes e transformações geométricas
+- **SSIM**: Melhor para detectar cópias com pequenas alterações
+- **SSIM + SIFT**: Combina ambos os métodos para maior precisão
+
+**Interpretação do score:**
+- **0.0 - 0.3**: Imagens diferentes
+- **0.3 - 0.6**: Possível duplicata com alterações
+- **0.6 - 1.0**: Duplicata provável
+""")
+
+# Contato e informações
+st.sidebar.markdown("---")
+st.sidebar.info("""
+### 📊 Mirror Glass
+Sistema de Análise de Duplicidade em Imagens
+
+Desenvolvido com Streamlit, OpenCV e Scikit-Image
+""")
+
