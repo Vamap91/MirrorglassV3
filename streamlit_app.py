@@ -1,7 +1,5 @@
 import streamlit as st
-import os
 import numpy as np
-import matplotlib.pyplot as plt
 from PIL import Image
 import io
 import base64
@@ -14,14 +12,14 @@ import cv2
 
 # Configuração da página Streamlit
 st.set_page_config(
-    page_title="Mirror Glass - Detector de Duplicatas",
+    page_title="Mirrorglass Versão 3 - Análise de Duplicidade",
     page_icon="🔍",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
 # Título e introdução
-st.title("📊 Mirror Glass: Análise de Duplicidade em Imagens")
+st.title("📊 Mirrorglass Versão 3 - Análise de Duplicidade")
 st.markdown("""
 Este sistema utiliza técnicas avançadas de visão computacional para:
 - **Detectar imagens duplicadas** ou altamente semelhantes, mesmo com alterações como cortes ou ajustes
@@ -491,9 +489,8 @@ st.markdown("""
 # Contato e informações
 st.sidebar.markdown("---")
 st.sidebar.info("""
-### 📊 Mirror Glass
+### 📊 Mirrorglass Versão 3
 Sistema de Análise de Duplicidade em Imagens
 
 Desenvolvido com Streamlit, OpenCV e Scikit-Image
 """)
-
