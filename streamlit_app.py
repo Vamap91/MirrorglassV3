@@ -299,7 +299,10 @@ elif mode == "Gerenciar Banco de Dados":
                 status_text.empty()
                 progress_bar.empty()
                 st.success(f"✅ {len(uploaded_files)} imagem(ns) adicionada(s) ao banco de dados!")
-                st.rerun()
+                try:
+                    st.rerun()
+                except:
+                    st.experimental_rerun()
     
     with tab2:
         st.subheader("Imagens no Banco de Dados")
@@ -329,7 +332,10 @@ elif mode == "Gerenciar Banco de Dados":
                 db.metadata = {}
                 db.save_database()
                 st.success("✅ Banco de dados limpo!")
-                st.rerun()
+                try:
+                    st.rerun()
+                except:
+                    st.experimental_rerun()
 
 # Rodapé
 st.markdown("---")
