@@ -12,18 +12,20 @@ try:
 except ImportError:
     OPENAI_AVAILABLE = False
 
-st.set_page_config(page_title="Detector ULTRA Sensível", page_icon="🔥", layout="wide")
+st.set_page_config(page_title="Detector Duplicatas", page_icon="🔍", layout="wide")
 
 if 'base_historica' not in st.session_state:
     st.session_state.base_historica = []
     st.session_state.nomes_historico = []
 
 def image_to_base64(img):
+    if isinstance(img, np.ndarray):
+        img = Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
     buffered = io.BytesIO()
     img.save(buffered, format="PNG")
     return base64.b64encode(buffered.getvalue()).decode()
 
-def analisar_ia_sempre(img1, img2, api_key, scores_tecnicos):
+def analisar_contexto_openai(img1, img2, api_key, sift_score):
     openai.api_key = api_key
     
     img1_b64 = image_to_base64(img1)
@@ -38,37 +40,26 @@ def analisar_ia_sempre(img1, img2, api_key, scores_tecnicos):
                     "content": [
                         {
                             "type": "text",
-                            "text": f"""DETECÇÃO ULTRA SENSÍVEL DE DUPLICATAS/CROPS:
+                            "text": f"""ANÁLISE DE DUPLICATA - Score SIFT: {sift_score:.0%}
 
-Scores técnicos detectados:
-- Similaridade pixel: {scores_tecnicos.get('pixel', 0):.0%}
-- Similaridade cor: {scores_tecnicos.get('hist', 0):.0%}
-- SIFT matches: {scores_tecnicos.get('sift_matches', 0)}
-
-Compare estas 2 imagens com MÁXIMA ATENÇÃO para crops/edições:
+Compare estas imagens e responda APENAS em JSON:
 
 {{
-    "imagem1_completa": "descrição detalhada",
-    "imagem2_completa": "descrição detalhada",
-    "mesmo_carro": true/false,
-    "mesma_cena": true/false,
+    "mesmo_veiculo": true/false,
     "mesmo_local": true/false,
-    "mesmo_fundo": true/false,
-    "elementos_identicos": ["jeep fundo", "parede", "loja", "etc"],
-    "eh_mesma_foto": true/false,
-    "eh_crop": true/false,
-    "eh_zoom": true/false,
-    "confianca_duplicata": 0-100,
-    "explicacao_detalhada": "explicação MUITO detalhada",
-    "tipo": "EXATA|CROP|ZOOM|EDITADA|DIFERENTES"
+    "mesmo_contexto": true/false,
+    "mesma_oficina": true/false,
+    "elementos_comuns": ["elemento1", "elemento2"],
+    "sao_duplicatas": true/false,
+    "confianca": 0-100,
+    "motivo": "explicação"
 }}
 
-CRÍTICO:
-- Se mesma oficina + mesmo carro + mesmos objetos fundo → eh_mesma_foto=TRUE
-- Se uma imagem mostra MENOS da cena mas o que mostra é IDÊNTICO → eh_crop=TRUE
-- Se contexto/fundo 80%+ idêntico → mesma_foto=TRUE
-- SEMPRE liste TODOS elementos idênticos visíveis
-- Se dúvida entre crop e diferentes → prefira crop=TRUE"""
+REGRAS:
+- Se mesmo veículo + mesma oficina → duplicatas=true
+- Se contexto 80%+ idêntico → duplicatas=true
+- Se apenas ângulo diferente mas mesma cena → duplicatas=true
+- Liste TODOS elementos comuns"""
                         },
                         {
                             "type": "image_url",
@@ -81,164 +72,96 @@ CRÍTICO:
                     ]
                 }
             ],
-            max_tokens=800
+            max_tokens=500
         )
         
         result_text = response.choices[0].message.content
         result_text = result_text.replace("```json", "").replace("```", "").strip()
-        result = json.loads(result_text)
+        return json.loads(result_text)
         
-        return {
-            'enabled': True,
-            'img1': result.get('imagem1_completa', 'N/A'),
-            'img2': result.get('imagem2_completa', 'N/A'),
-            'mesmo_carro': result.get('mesmo_carro', False),
-            'mesma_cena': result.get('mesma_cena', False),
-            'mesmo_local': result.get('mesmo_local', False),
-            'mesmo_fundo': result.get('mesmo_fundo', False),
-            'elementos': result.get('elementos_identicos', []),
-            'eh_mesma_foto': result.get('eh_mesma_foto', False),
-            'eh_crop': result.get('eh_crop', False),
-            'eh_zoom': result.get('eh_zoom', False),
-            'confianca': result.get('confianca_duplicata', 0),
-            'explicacao': result.get('explicacao_detalhada', 'N/A'),
-            'tipo': result.get('tipo', 'N/A')
-        }
     except Exception as e:
-        return {'enabled': False, 'error': str(e)}
+        return {'error': str(e)}
 
-def analise_tecnica_rapida(img1, img2):
-    size = 256
-    img1_small = np.array(img1.resize((size, size)).convert('RGB'))
-    img2_small = np.array(img2.resize((size, size)).convert('RGB'))
-    
-    diff = np.abs(img1_small.astype(float) - img2_small.astype(float))
-    pixel_score = 1.0 - (np.mean(diff) / 255.0)
-    
-    img1_cv = cv2.cvtColor(img1_small, cv2.COLOR_RGB2BGR)
-    img2_cv = cv2.cvtColor(img2_small, cv2.COLOR_RGB2BGR)
-    
-    hist1 = cv2.calcHist([img1_cv], [0,1,2], None, [16,16,16], [0,256,0,256,0,256])
-    hist1 = cv2.normalize(hist1, hist1).flatten()
-    
-    hist2 = cv2.calcHist([img2_cv], [0,1,2], None, [16,16,16], [0,256,0,256,0,256])
-    hist2 = cv2.normalize(hist2, hist2).flatten()
-    
-    hist_score = cv2.compareHist(hist1, hist2, cv2.HISTCMP_CORREL)
-    
-    gray1 = cv2.cvtColor(img1_small, cv2.COLOR_RGB2GRAY)
-    gray2 = cv2.cvtColor(img2_small, cv2.COLOR_RGB2GRAY)
-    
-    sift = cv2.SIFT_create(nfeatures=300)
-    kp1, des1 = sift.detectAndCompute(gray1, None)
-    kp2, des2 = sift.detectAndCompute(gray2, None)
-    
-    sift_matches = 0
-    if des1 is not None and des2 is not None and len(des1) > 5 and len(des2) > 5:
-        bf = cv2.BFMatcher()
-        matches = bf.knnMatch(des1, des2, k=2)
+def calcular_sift(img1, img2):
+    try:
+        if isinstance(img1, Image.Image):
+            img1 = np.array(img1)
+        if isinstance(img2, Image.Image):
+            img2 = np.array(img2)
+        
+        gray1 = cv2.cvtColor(img1, cv2.COLOR_RGB2GRAY) if len(img1.shape) == 3 else img1
+        gray2 = cv2.cvtColor(img2, cv2.COLOR_RGB2GRAY) if len(img2.shape) == 3 else img2
+        
+        sift = cv2.SIFT_create()
+        kp1, des1 = sift.detectAndCompute(gray1, None)
+        kp2, des2 = sift.detectAndCompute(gray2, None)
+        
+        if des1 is None or des2 is None or len(des1) < 2 or len(des2) < 2:
+            return 0, 0
+        
+        FLANN_INDEX_KDTREE = 1
+        index_params = dict(algorithm=FLANN_INDEX_KDTREE, trees=5)
+        search_params = dict(checks=50)
+        flann = cv2.FlannBasedMatcher(index_params, search_params)
+        
+        matches = flann.knnMatch(des1, des2, k=2)
         
         good = []
-        for m_pair in matches:
-            if len(m_pair) == 2:
-                m, n = m_pair
-                if m.distance < 0.75 * n.distance:
-                    good.append(m)
+        for m, n in matches:
+            if m.distance < 0.7 * n.distance:
+                good.append(m)
         
-        sift_matches = len(good)
+        max_matches = min(len(kp1), len(kp2))
+        if max_matches == 0:
+            return 0, 0
+        
+        score = len(good) / max_matches
+        return score, len(good)
+        
+    except Exception as e:
+        return 0, 0
+
+def detectar_duplicata(img1, img2, api_key, usar_ia):
+    sift_score, good_matches = calcular_sift(img1, img2)
     
-    score_final = (pixel_score * 0.4) + (hist_score * 0.4) + (min(sift_matches/50, 1.0) * 0.2)
+    if sift_score >= 0.40:
+        return {
+            'duplicata': True,
+            'metodo': 'SIFT',
+            'score': sift_score,
+            'matches': good_matches,
+            'motivo': f'Alta similaridade SIFT: {sift_score:.0%} ({good_matches} matches)'
+        }
+    
+    if sift_score >= 0.15 and usar_ia and api_key:
+        ia_result = analisar_contexto_openai(img1, img2, api_key, sift_score)
+        
+        if 'error' not in ia_result:
+            sao_dup = ia_result.get('sao_duplicatas', False)
+            mesmo_veiculo = ia_result.get('mesmo_veiculo', False)
+            mesmo_contexto = ia_result.get('mesmo_contexto', False)
+            confianca = ia_result.get('confianca', 0) / 100.0
+            
+            if sao_dup or (mesmo_veiculo and mesmo_contexto) or confianca >= 0.70:
+                return {
+                    'duplicata': True,
+                    'metodo': 'IA',
+                    'score': max(sift_score, confianca),
+                    'matches': good_matches,
+                    'motivo': ia_result.get('motivo', 'IA confirmou duplicata'),
+                    'ia_detalhes': ia_result
+                }
     
     return {
-        'pixel': pixel_score,
-        'hist': hist_score,
-        'sift_matches': sift_matches,
-        'score': score_final,
-        'duplicata_obvia': score_final >= 0.95 and sift_matches >= 40
+        'duplicata': False,
+        'metodo': 'OK',
+        'score': sift_score,
+        'matches': good_matches,
+        'motivo': 'Imagens diferentes'
     }
 
-def decisao_ultra_sensivel(tecnico, ia_result, usar_ia):
-    if tecnico['duplicata_obvia']:
-        return {
-            'eh_duplicata': True,
-            'confianca': tecnico['score'],
-            'metodo': '🔴 DUPLICATA ÓBVIA',
-            'razao': f"Score {tecnico['score']:.0%}, {tecnico['sift_matches']} matches",
-            'usou_ia': False
-        }
-    
-    if not usar_ia or not ia_result or not ia_result.get('enabled'):
-        if tecnico['score'] >= 0.75:
-            return {
-                'eh_duplicata': True,
-                'confianca': tecnico['score'],
-                'metodo': '🟡 SUSPEITA (sem IA)',
-                'razao': f"Score técnico {tecnico['score']:.0%} - Recomendo ativar IA",
-                'usou_ia': False
-            }
-        return {
-            'eh_duplicata': False,
-            'confianca': tecnico['score'],
-            'metodo': '✅ OK (sem IA)',
-            'razao': 'Análise técnica insuficiente - Recomendo ativar IA',
-            'usou_ia': False
-        }
-    
-    ia_conf = ia_result.get('confianca', 0) / 100.0
-    eh_mesma = ia_result.get('eh_mesma_foto', False)
-    eh_crop = ia_result.get('eh_crop', False)
-    eh_zoom = ia_result.get('eh_zoom', False)
-    mesmo_fundo = ia_result.get('mesmo_fundo', False)
-    mesma_cena = ia_result.get('mesma_cena', False)
-    
-    if eh_mesma or eh_crop or eh_zoom:
-        conf_final = max(ia_conf, (tecnico['score'] + ia_conf) / 2)
-        tipo = "CROP" if eh_crop else "ZOOM" if eh_zoom else "MESMA FOTO"
-        
-        return {
-            'eh_duplicata': True,
-            'confianca': conf_final,
-            'metodo': f'🚨 {tipo} DETECTADO',
-            'razao': ia_result.get('explicacao', 'IA confirmou duplicata'),
-            'usou_ia': True,
-            'ia_detalhes': ia_result
-        }
-    
-    if (mesmo_fundo or mesma_cena) and ia_conf >= 0.60:
-        conf_final = (tecnico['score'] * 0.3) + (ia_conf * 0.7)
-        
-        return {
-            'eh_duplicata': True,
-            'confianca': conf_final,
-            'metodo': '🟠 CONTEXTO IDÊNTICO',
-            'razao': ia_result.get('explicacao', 'Mesmo contexto/fundo'),
-            'usou_ia': True,
-            'ia_detalhes': ia_result
-        }
-    
-    if tecnico['score'] >= 0.70 and ia_conf >= 0.50:
-        conf_final = (tecnico['score'] * 0.4) + (ia_conf * 0.6)
-        
-        return {
-            'eh_duplicata': True,
-            'confianca': conf_final,
-            'metodo': '🟡 SUSPEITA CONFIRMADA',
-            'razao': 'Técnico + IA indicam duplicata',
-            'usou_ia': True,
-            'ia_detalhes': ia_result
-        }
-    
-    return {
-        'eh_duplicata': False,
-        'confianca': max(tecnico['score'], ia_conf),
-        'metodo': '✅ NÃO É DUPLICATA',
-        'razao': ia_result.get('explicacao', 'IA confirmou: imagens diferentes'),
-        'usou_ia': True,
-        'ia_detalhes': ia_result
-    }
-
-st.title("🔥 Detector ULTRA Sensível")
-st.markdown("### IA Sempre Ativa + Thresholds Baixos = Máxima Detecção")
+st.title("🔍 Detector de Duplicatas")
+st.markdown("### SIFT + OpenAI Context Analysis")
 
 with st.sidebar:
     st.header("📚 Base")
@@ -253,8 +176,7 @@ with st.sidebar:
             api_key = st.secrets.get("OPENAI_API_KEY", None)
             if api_key:
                 st.success("✅ OpenAI")
-                usar_ia = st.checkbox("🔥 IA Ultra Sensível", value=True,
-                    help="SEMPRE analisa com IA - Máxima detecção")
+                usar_ia = st.checkbox("🤖 Análise IA", value=True)
             else:
                 st.error("❌ Configure OPENAI_API_KEY")
         except:
@@ -280,7 +202,7 @@ with st.sidebar:
                         st.session_state.nomes_historico.append(f.name)
                         novos += 1
                     except:
-                        st.error(f"Erro: {f.name}")
+                        pass
             
             if novos > 0:
                 st.success(f"✅ +{novos}")
@@ -291,22 +213,6 @@ with st.sidebar:
             st.session_state.base_historica = []
             st.session_state.nomes_historico = []
             st.rerun()
-        
-        with st.expander("📋 Ver"):
-            for idx, nome in enumerate(st.session_state.nomes_historico):
-                st.caption(f"{idx+1}. {nome}")
-    
-    st.markdown("---")
-    st.warning("""
-    **🔥 MODO ULTRA SENSÍVEL:**
-    
-    ✅ IA analisa TODAS comparações
-    ✅ Thresholds MUITO baixos
-    ✅ Detecta crops mais sutis
-    ✅ Prefere detectar a perder
-    
-    Custo: $0.01 por comparação
-    """)
 
 st.markdown("---")
 
@@ -335,16 +241,11 @@ else:
         with col2:
             st.subheader(f"📚 Base: {len(st.session_state.base_historica)}")
             if usar_ia:
-                st.success("🔥 IA ativa para máxima detecção")
-            else:
-                st.warning("⚠️ Ative IA para melhor detecção")
+                st.info("🤖 IA ativa para análise de contexto")
         
         st.markdown("---")
         
-        if st.button("🔥 Análise ULTRA Sensível", type="primary", use_container_width=True):
-            if not usar_ia:
-                st.error("⚠️ ATENÇÃO: IA desativada! Recomendo ativar para detectar crops.")
-            
+        if st.button("🔍 Detectar Duplicatas", type="primary", use_container_width=True):
             progress = st.progress(0)
             status = st.empty()
             
@@ -354,38 +255,28 @@ else:
                 progress.progress((idx + 1) / len(st.session_state.base_historica))
                 status.text(f"Analisando {idx + 1}/{len(st.session_state.base_historica)}")
                 
-                tecnico = analise_tecnica_rapida(nova_img, img_base)
+                resultado = detectar_duplicata(nova_img, img_base, api_key, usar_ia)
                 
-                ia_result = None
-                if usar_ia and api_key:
-                    ia_result = analisar_ia_sempre(nova_img, img_base, api_key, tecnico)
-                
-                decisao = decisao_ultra_sensivel(tecnico, ia_result, usar_ia)
-                
-                resultados.append({
-                    'idx': idx,
-                    'nome': st.session_state.nomes_historico[idx],
-                    'img': img_base,
-                    'tecnico': tecnico,
-                    'ia': ia_result,
-                    'decisao': decisao
-                })
+                if resultado['duplicata']:
+                    resultados.append({
+                        'idx': idx,
+                        'nome': st.session_state.nomes_historico[idx],
+                        'img': img_base,
+                        'resultado': resultado
+                    })
             
             progress.empty()
             status.empty()
             
-            duplicatas = [r for r in resultados if r['decisao']['eh_duplicata']]
-            ok = [r for r in resultados if not r['decisao']['eh_duplicata']]
-            
             st.markdown("---")
             st.markdown("## 📊 Resultado")
             
-            if duplicatas:
-                st.error(f"🚨 {len(duplicatas)} DUPLICATA(S)")
+            if resultados:
+                st.error(f"🚨 {len(resultados)} DUPLICATA(S)")
                 
-                for idx, d in enumerate(duplicatas):
+                for r in resultados:
                     st.markdown("---")
-                    st.subheader(f"🚨 Match #{idx+1}")
+                    st.subheader(f"🚨 Duplicata: {r['nome']}")
                     
                     col1, col2, col3 = st.columns([2, 2, 1])
                     
@@ -394,76 +285,36 @@ else:
                         st.image(nova_img, use_column_width=True)
                     
                     with col2:
-                        st.markdown(f"**📚 Base ({d['idx']+1})**")
-                        st.image(d['img'], caption=d['nome'], use_column_width=True)
+                        st.markdown(f"**📚 Base**")
+                        st.image(r['img'], caption=r['nome'], use_column_width=True)
                     
                     with col3:
-                        st.metric("Confiança", f"{d['decisao']['confianca']:.0%}")
+                        res = r['resultado']
+                        st.metric("Score", f"{res['score']:.0%}")
+                        st.metric("Matches", res['matches'])
                         
-                        metodo = d['decisao']['metodo']
-                        if "CROP" in metodo or "ZOOM" in metodo:
-                            st.error("🚨 DETECTADO")
-                        elif "ÓBVIA" in metodo:
-                            st.error("🔴 ÓBVIA")
-                        elif "CONTEXTO" in metodo:
-                            st.warning("🟠 CONTEXTO")
+                        if res['metodo'] == 'IA':
+                            st.error("🤖 IA")
                         else:
-                            st.warning("🟡 SUSPEITA")
+                            st.error("🔬 SIFT")
                         
-                        st.markdown(f"**{metodo}**")
-                        st.caption(f"💡 {d['decisao']['razao']}")
+                        st.caption(res['motivo'])
                     
-                    if d['decisao'].get('usou_ia') and d['ia'] and d['ia'].get('enabled'):
-                        with st.expander("🔍 Análise Completa IA"):
-                            ia = d['ia']
+                    if 'ia_detalhes' in res:
+                        with st.expander("🔍 Análise IA"):
+                            ia = res['ia_detalhes']
+                            st.write(f"**Mesmo veículo:** {'✅' if ia.get('mesmo_veiculo') else '❌'}")
+                            st.write(f"**Mesmo local:** {'✅' if ia.get('mesmo_local') else '❌'}")
+                            st.write(f"**Mesmo contexto:** {'✅' if ia.get('mesmo_contexto') else '❌'}")
+                            st.write(f"**Confiança:** {ia.get('confianca')}%")
                             
-                            col_a, col_b = st.columns(2)
-                            
-                            with col_a:
-                                st.write("**🆕 Nova:**")
-                                st.write(f"{ia['img1']}")
-                            
-                            with col_b:
-                                st.write("**📚 Base:**")
-                                st.write(f"{ia['img2']}")
-                            
-                            st.markdown("---")
-                            
-                            st.write(f"**Mesmo carro:** {'✅' if ia['mesmo_carro'] else '❌'}")
-                            st.write(f"**Mesma cena:** {'✅' if ia['mesma_cena'] else '❌'}")
-                            st.write(f"**Mesmo local:** {'✅' if ia['mesmo_local'] else '❌'}")
-                            st.write(f"**Mesmo fundo:** {'✅' if ia['mesmo_fundo'] else '❌'}")
-                            st.write(f"**É crop:** {'🚨' if ia['eh_crop'] else '❌'}")
-                            st.write(f"**É zoom:** {'🚨' if ia['eh_zoom'] else '❌'}")
-                            st.write(f"**Mesma foto:** {'🚨' if ia['eh_mesma_foto'] else '❌'}")
-                            
-                            st.write("---")
-                            st.write(f"**Confiança IA:** {ia['confianca']}%")
-                            st.write(f"**Tipo:** {ia['tipo']}")
-                            
-                            if ia['elementos']:
-                                st.write("**Elementos idênticos:**")
-                                for elem in ia['elementos']:
+                            if ia.get('elementos_comuns'):
+                                st.write("**Elementos comuns:**")
+                                for elem in ia['elementos_comuns']:
                                     st.write(f"• {elem}")
-                            
-                            st.write("---")
-                            st.write(f"**Explicação:** {ia['explicacao']}")
-                    
-                    with st.expander("📊 Scores Técnicos"):
-                        st.write(f"- Pixel: {d['tecnico']['pixel']:.0%}")
-                        st.write(f"- Histograma: {d['tecnico']['hist']:.0%}")
-                        st.write(f"- SIFT matches: {d['tecnico']['sift_matches']}")
-                        st.write(f"- Score final: {d['tecnico']['score']:.0%}")
             
             else:
                 st.success("✅ Nenhuma duplicata")
-                if usar_ia:
-                    st.info("IA analisou todas e confirmou: imagens diferentes")
-            
-            if ok:
-                with st.expander(f"✅ {len(ok)} OK"):
-                    for o in ok[:3]:
-                        st.caption(f"{o['nome']}: {o['decisao']['confianca']:.0%}")
 
 st.markdown("---")
-st.caption("Detector ULTRA Sensível | IA Sempre Ativa | Janeiro 2026")
+st.caption("Detector Duplicatas | SIFT + OpenAI | Janeiro 2026")
